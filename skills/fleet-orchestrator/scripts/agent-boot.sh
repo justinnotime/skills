@@ -8,6 +8,8 @@ export PYTHONDONTWRITEBYTECODE=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="$HERE/lib/fleet-profile.py"
+entry_resolved=0
+if [[ "${1:-}" == --resolved ]]; then entry_resolved=1; shift; fi
 if [[ "${1:-}" == "--config" ]]; then
   (($# >= 2)) || { echo "--config requires a file" >&2; exit 2; }
   export FLEET_ORCHESTRATOR_CONFIG=$2
@@ -17,10 +19,16 @@ if [[ "${1:-}" == "--fleet" ]]; then
   (($# >= 2)) || { echo "usage: agent-boot.sh --fleet <name> [task-slug]" >&2; exit 2; }
   fleet=$2
   shift 2
-  exec python3 "$PROFILE" exec "$fleet" -- bash "$0" "$@"
+  exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
 fi
 if [[ -n "${NW_FLEET:-}" && "${NW_FLEET_PROFILE_APPLIED:-}" != "$NW_FLEET" ]]; then
-  exec python3 "$PROFILE" exec "$NW_FLEET" -- bash "$0" "$@"
+  exec python3 "$PROFILE" exec "$NW_FLEET" -- bash "$0" --resolved "$@"
+fi
+if [[ "$entry_resolved" == 0 && -z "${NW_FLEET:-}" && -n "${TMUX:-}" ]]; then
+  fleet=$(python3 "$PROFILE" current)
+  if [[ "$fleet" != default ]]; then
+    exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
+  fi
 fi
 
 BUS="$HERE/matrix-bus.sh"

@@ -35,7 +35,7 @@ Optional fields:
 | `protected_databases`, `protected_named_database_roots` | Explicit production database identities and named-fleet roots protected from development copies |
 | `paths.orchestrator_state`, `paths.lock_directory`, `paths.lock_prefix` | Runtime observations, snapshots, and default-fleet lock locations; an optional filename prefix preserves an existing lock identity |
 | `paths.legacy_drive_state` | Source directory for an explicit legacy-state import |
-| `fleets.profile_directory`, `fleets.runtime_directory`, `fleets.matrix_config_directory` | Named fleet profile and isolated storage roots |
+| `fleets.profile_directory`, `fleets.runtime_directory`, `fleets.matrix_config_directory` | Optional explicit profiles and separate session task/message storage roots; ordinary local sessions need no profile |
 | `fleets.default_name` | Optional alias for the existing default fleet; defaults to `default`, without creating a profile or changing storage |
 | `tmux.server_file` | Optional terminal server selector |
 | `tmux.primary_session` | Default fleet's exact primary session name; defaults to `0` |

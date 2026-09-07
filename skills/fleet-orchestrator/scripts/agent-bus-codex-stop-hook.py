@@ -28,7 +28,7 @@ def tmux_pane() -> str | None:
         except (OSError, ValueError, IndexError, StopIteration):
             break
     result = subprocess.run(
-        [*tmux_runtime.base_cmd(), "list-panes", "-a", "-F",
+        [*tmux_runtime.base_cmd(), "list-panes", *tmux_runtime.pane_scope(), "-F",
          "#{pane_pid} #{session_name}:#{window_index}.#{pane_index}"],
         text=True, capture_output=True, check=False,
     )

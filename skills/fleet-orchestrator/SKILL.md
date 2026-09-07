@@ -35,6 +35,14 @@ fleets; `default` and its caller-configured alias refer to the same fleet. Insid
 tmux, an unselected `tview` follows the actual associated session, not a stale
 fleet environment variable. Listing and entering do not start offline fleets.
 
+Ordinary local fleets are the primary tmux sessions on the configured server;
+their names select separate task and message stores without a fleet profile.
+`orc fleet start NAME` starts or reuses a session, `orc fleet window [NAME]`
+adds a window, and `orc fleet stop [NAME]` terminates its windows and agents,
+including grouped viewer sessions, while retaining saved work. Omitted names
+use the current session. Native tmux sessions are discovered automatically.
+Follow any caller-owned handoff requirements before an authorized stop.
+
 For a status or health request, start with the configured read-only board,
 operator-wait view, task history and diagnostics. Separate these observations:
 

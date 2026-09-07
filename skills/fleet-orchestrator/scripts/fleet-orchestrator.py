@@ -1714,6 +1714,10 @@ def frontier_tasks(conn, rows) -> list[sqlite3.Row]:
 
 
 def cmd_board(args: argparse.Namespace) -> int:
+    if (os.environ.get("NW_FLEET_PRIMARY_SESSION")
+            and not wp.configured_db_path().exists()):
+        print("OK    board empty; this session has no recorded tasks")
+        return 0
     conn = wp.connect_readonly()
     rows = open_tasks(conn)
     if args.repo:

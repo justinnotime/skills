@@ -62,7 +62,7 @@ def pane_locations() -> list[tuple[str, str]]:
         [
             *tmux_runtime.base_cmd(),
             "list-panes",
-            "-a",
+            *tmux_runtime.pane_scope(),
             "-F",
             "#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{window_name}",
         ],

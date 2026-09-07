@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Create and resolve one fully isolated named fleet.
+"""Use tmux sessions as local fleets, with separate durable task/message stores.
 
-The default fleet has no separate profile; its optional display name is an
-alias, not another database or transport. A named profile is
-an all-or-nothing boundary around tmux, ORC state, and Agent Bus state. Matrix
-profiles retain their two-room boundary. Local profiles delete that dependency
-and are valid only on the host that created them. Physical separation avoids a
-fleet column in every database table and a fleet filter in every query.
+Ordinary local sessions need no fleet configuration file. Explicit legacy and
+Matrix profiles remain supported; the default fleet retains its existing data
+and optional display alias. Grouped terminal views are not additional fleets.
 """
 
 from __future__ import annotations
@@ -17,6 +14,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -501,14 +499,27 @@ def resolve(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
     if name == "default":
         return {}
     path = profile_path(name, env)
-    profile = _validate_profile(name, _read_json(path), path)
-    _validate_unique(name, profile, env)
+    if path.exists() or path.is_symlink():
+        profile = _validate_profile(name, _read_json(path), path)
+        _validate_unique(name, profile, env)
+        profile_source = str(path)
+    else:
+        sessions = local_sessions(env)
+        if name not in sessions and not (runtime_root(env) / name).is_dir():
+            raise FleetProfileError(f"fleet {name!r} does not exist: no tmux session or saved work")
+        profile = {
+            "schema": LOCAL_SCHEMA,
+            "tmux_server": _default_tmux_server(env) or "default",
+            "primary_session": name,
+            "local_host": local_hostname(),
+        }
+        profile_source = ""
 
     runtime = runtime_root(env) / name
     common = {
         "NW_FLEET": name,
         "NW_FLEET_PROFILE_APPLIED": name,
-        "NW_FLEET_PROFILE_PATH": str(path),
+        "NW_FLEET_PROFILE_PATH": profile_source,
         "NW_FLEET_PRIMARY_SESSION": str(profile["primary_session"]),
         "NW_TMUX_SERVER": str(profile["tmux_server"]),
         "NOTES_RUNTIME_DIR": str(runtime),
@@ -585,6 +596,10 @@ def apply_tmux_environment(name: str, *, dry_run: bool,
                            env: Mapping[str, str] = os.environ) -> None:
     values = resolve(name, env)
     server = values["NW_TMUX_SERVER"]
+    session_scope = not values["NW_FLEET_PROFILE_PATH"]
+    scope = (["-t", "=" + values["NW_FLEET_PRIMARY_SESSION"]]
+             if session_scope else ["-g"])
+    clear_scope = [*scope, "-u"] if session_scope else ["-gu"]
     base, process_env = _tmux_context(name, env)
     probe = _run_tmux(base, ["list-sessions"], process_env)
     if probe.returncode:
@@ -603,7 +618,7 @@ def apply_tmux_environment(name: str, *, dry_run: bool,
     # during the update, descendants see NW_FLEET without a matching marker;
     # wrappers re-resolve it and the direct adapter refuses it.
     clear = _run_tmux(
-        base, ["set-environment", "-gu", "NW_FLEET_PROFILE_APPLIED"], process_env
+        base, ["set-environment", *clear_scope, "NW_FLEET_PROFILE_APPLIED"], process_env
     )
     if clear.returncode:
         raise FleetProfileError(
@@ -612,7 +627,7 @@ def apply_tmux_environment(name: str, *, dry_run: bool,
     for key in PROFILE_ENV_KEYS:
         if key in values or key == "NW_FLEET_PROFILE_APPLIED":
             continue
-        result = _run_tmux(base, ["set-environment", "-gu", key], process_env)
+        result = _run_tmux(base, ["set-environment", *clear_scope, key], process_env)
         if result.returncode:
             raise FleetProfileError(
                 result.stderr.strip() or f"could not clear tmux environment {key}"
@@ -624,13 +639,14 @@ def apply_tmux_environment(name: str, *, dry_run: bool,
     for key in ordered:
         value = values[key]
         result = _run_tmux(
-            base, ["set-environment", "-g", key, value], process_env
+            base, ["set-environment", *scope, key, value], process_env
         )
         if result.returncode:
             raise FleetProfileError(
                 result.stderr.strip() or f"could not set tmux environment {key}"
             )
-    print(f"set named-fleet environment on tmux server {server}")
+    target = values["NW_FLEET_PRIMARY_SESSION"] if session_scope else server
+    print(f"set fleet environment on tmux {'session' if session_scope else 'server'} {target}")
 
 
 def ensure_primary_session(
@@ -774,6 +790,121 @@ def _terminal_tmux(args: list[str], env: Mapping[str, str]):
         raise FleetProfileError("tmux could not be executed") from exc
 
 
+def local_sessions(env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """Discover primary sessions; tmux owns their lifecycle, not a registry."""
+    values = _default_environment(env)
+    values.pop("TMUX", None)
+    values.pop("TMUX_PANE", None)
+    result = _terminal_tmux([
+        "-L", _default_tmux_server(env) or "default", "list-sessions", "-F",
+        "#{session_name}\t#{session_group}",
+    ], values)
+    if result.returncode:
+        if any(message in result.stderr.lower() for message in (
+            "no server running", "no such file or directory", "connection refused",
+        )):
+            return {}
+        raise FleetProfileError(result.stderr.strip() or "cannot list tmux sessions")
+    sessions = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 2:
+            continue
+        name, group = fields
+        if NAME_RE.fullmatch(name) and not name.startswith("tview-"):
+            sessions[name] = group
+    # A grouped view is another client view of the same windows.
+    return {name: group for name, group in sessions.items()
+            if not group or group == name or group not in sessions}
+
+
+def create_session(name: str, env: Mapping[str, str] = os.environ) -> None:
+    """The compatibility create command creates only a native tmux session."""
+    validate_name(name)
+    if _canonical_name(name, env) == "default":
+        raise FleetProfileError("use the existing default session")
+    server = _default_tmux_server(env) or "default"
+    values = _default_environment(env)
+    values.pop("TMUX", None)
+    values.pop("TMUX_PANE", None)
+    if name not in local_sessions(env):
+        result = _terminal_tmux([
+            "-L", server, "new-session", "-d", "-s", name, "-n", "main",
+        ], values)
+        if result.returncode and name not in local_sessions(env):
+            raise FleetProfileError(result.stderr.strip() or "cannot create tmux session")
+    print(f"ready tmux session {name!r}; fleet mapping is automatic")
+    print(f"attach with: tview --fleet {name}")
+
+
+def session_action(action: str, name: str | None,
+                   env: Mapping[str, str] = os.environ) -> None:
+    """Manage native windows; no second lifecycle registry is maintained."""
+    target = terminal_target(name, env)
+    status, actual = _terminal_observation(target, env)
+    if status != "online":
+        raise FleetProfileError(f"fleet {target['name']!r} has no running session")
+    values = dict(env)
+    values.pop("TMUX", None)
+    base = ["-L", target["tmux_server"]]
+    primary = target["primary_session"]
+    if action == "window":
+        result = _terminal_tmux([
+            *base, "new-window", "-d", "-P", "-F", "#{session_name}:#{window_index}",
+            "-t", "=" + primary,
+        ], values)
+        if result.returncode:
+            raise FleetProfileError(result.stderr.strip() or "cannot add window")
+        print(result.stdout.strip())
+        return
+
+    result = _terminal_tmux([
+        *base, "list-panes", "-a", "-F",
+        "#{session_name}\t#{session_group}\t#{window_id}\t#{pane_id}",
+    ], values)
+    if result.returncode:
+        raise FleetProfileError(result.stderr.strip() or "cannot inspect windows")
+    rows = [line.split("\t") for line in result.stdout.splitlines()]
+    rows = [row for row in rows if len(row) == 4]
+    windows = {row[2] for row in rows if row[0] == primary}
+    panes = {row[3] for row in rows if row[0] == primary}
+    if not windows:
+        raise FleetProfileError("no windows found; refusing an unverified stop")
+    if any(row[2] in windows and row[0] != primary
+           and (not actual["group"] or row[1] != actual["group"]) for row in rows):
+        raise FleetProfileError("a window is linked outside this session group")
+    selected = command_env(target["name"], env)
+
+    database = selected.get("AGENT_BUS_DB")
+    if database and Path(database).is_file():
+        with sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True) as db:
+            registrations = db.execute(
+                "SELECT agent_id,pane_id FROM identities WHERE status='active' AND host=?",
+                (local_hostname(),),
+            ).fetchall()
+        for agent_id, pane in registrations:
+            if pane not in panes:
+                continue
+            retired = subprocess.run([
+                "bash", str(Path(__file__).resolve().parents[1] / "matrix-bus.sh"),
+                "--fleet", target["name"], "retire", agent_id,
+            ], env=dict(env), text=True, capture_output=True, check=False)
+            if retired.returncode:
+                raise FleetProfileError(retired.stderr.strip() or "registration retirement failed")
+    # Close the caller's own window last: a stop invoked inside this session
+    # must finish retiring registrations and closing its peers before exiting.
+    caller_pane = env.get("TMUX_PANE")
+    last = next((row[2] for row in rows
+                 if row[0] == primary and row[3] == caller_pane), sorted(windows)[-1])
+    result = _terminal_tmux([*base, "kill-window", "-a", "-t", last], values)
+    if result.returncode:
+        raise FleetProfileError(result.stderr.strip() or "cannot close peer windows")
+    result = _terminal_tmux([*base, "kill-window", "-t", last], values)
+    if result.returncode:
+        raise FleetProfileError(result.stderr.strip() or "cannot close final window")
+    print(f"stopped session {primary!r}; saved tasks and message history retained")
+
+
 def _terminal_observation(target: Mapping[str, str], env: Mapping[str, str]):
     values = dict(env)
     values.pop("TMUX", None)
@@ -811,6 +942,16 @@ def _configured_names(env: Mapping[str, str]) -> list[str]:
                      if path.stem != "default")
     except OSError as exc:
         raise FleetProfileError("fleet profiles could not be listed") from exc
+    primary = cfg.get("tmux.primary_session", "0", env=_default_environment(env))
+    try:
+        discovered = local_sessions(env)
+    except FleetProfileError:
+        # The default-server row still reports the failed observation. Keep
+        # independently configured fleets inspectable when that server fails.
+        discovered = {}
+    names.extend(name for name in discovered
+                 if name != primary and name not in names
+                 and name != default_name(env))
     return names
 
 
@@ -930,9 +1071,17 @@ def parser() -> argparse.ArgumentParser:
     create_p.add_argument("--tmux-server", help=argparse.SUPPRESS)
     create_p.add_argument("--primary-session", help=argparse.SUPPRESS)
 
+    for action in ("window", "stop"):
+        action_p = sub.add_parser(action, help=(
+            "add a window to the session" if action == "window" else
+            "terminate the session's windows and agents; retain saved work"))
+        action_p.add_argument("name", nargs="?")
+
     exec_p = sub.add_parser("exec", help="run one command in a named fleet")
     exec_p.add_argument("name")
     exec_p.add_argument("command", nargs=argparse.REMAINDER)
+
+    sub.add_parser("current", help="identify this process's tmux-session fleet")
 
     tmux_p = sub.add_parser(
         "apply-tmux", help="make new processes on the fleet tmux server inherit its profile"
@@ -961,8 +1110,7 @@ def public_view(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str
         "agent_bus_db": values["AGENT_BUS_DB"],
     }
     if values["AGENT_BUS_TRANSPORT"] == "local":
-        profile = _read_json(Path(values["NW_FLEET_PROFILE_PATH"]))
-        view["local_host"] = str(profile["local_host"])
+        view["local_host"] = local_hostname()
     else:
         view.update({
             "matrix_config_dir": values["MATRIX_BUS_CFG"],
@@ -989,6 +1137,10 @@ def main(argv: list[str] | None = None) -> int:
                 _print_terminal_inventory(rows)
             return 0
         if args.action == "create":
+            if (not args.tmux_server and not args.primary_session
+                    and not profile_path(args.name).exists()):
+                create_session(args.name)
+                return 0
             path, created = create_local_profile(
                 args.name,
                 tmux_server=args.tmux_server,
@@ -1006,6 +1158,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"{session!r} on server {server!r}"
             )
             print(f"attach with: tview --fleet {args.name}")
+            return 0
+        if args.action == "current":
+            target = terminal_target()
+            print(_canonical_name(target["name"], os.environ))
+            return 0
+        if args.action in {"window", "stop"}:
+            session_action(args.action, args.name)
             return 0
         if args.action == "resolve":
             view = public_view(args.name)

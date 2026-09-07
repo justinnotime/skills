@@ -27,8 +27,8 @@ MAX_BYTES = 32 * 1024
 def tmux_base_cmd() -> list[str]:
     """The shared machine-local tmux invocation prefix.
 
-    NW_TMUX_SERVER overrides it for staging/one-shot use. Sessions are not an
-    isolation boundary: callers scan or target the selected server-wide fleet.
+    NW_TMUX_SERVER selects the server; a selected primary session limits
+    discovery and destination validation to that session's windows.
     """
     try:
         return tmux_runtime.base_cmd()
@@ -61,6 +61,10 @@ def pane_info(target: str) -> tuple[str, str, str, bool]:
         location, pane_id, command, dead = output.split("\t")
     except ValueError as exc:
         raise RuntimeError(f"unexpected tmux target metadata: {output!r}") from exc
+    if os.environ.get("NW_FLEET_PRIMARY_SESSION"):
+        allowed = tmux(["list-panes", *tmux_runtime.pane_scope(), "-F", "#{pane_id}"])
+        if pane_id not in allowed.splitlines():
+            raise RuntimeError("target pane is outside the selected fleet session")
     return location, pane_id, Path(command).name, dead == "1"
 
 
@@ -73,7 +77,7 @@ def canonical_location(pane_id: str, fallback: str) -> str:
     either way (grouped sessions share the pane), only the NAME in logs
     and errors stops lying about where the pane lives."""
     try:
-        out = tmux(["list-panes", "-a", "-F",
+        out = tmux(["list-panes", *tmux_runtime.pane_scope(), "-F",
                     "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"])
     except RuntimeError:
         return fallback

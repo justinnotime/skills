@@ -407,7 +407,7 @@ esac
 
         for fleet in ("alpha", "beta"):
             created = subprocess.run(
-                [str(ROOT / "scripts" / "orc"), "fleet", "create", fleet],
+                [str(ROOT / "scripts" / "orc"), "fleet", "create", fleet, "--tmux-server", f"nw-{fleet}"],
                 env=env, text=True, capture_output=True, check=False,
             )
             self.assertEqual(created.returncode, 0, created.stderr)
@@ -478,7 +478,7 @@ esac
     def test_orc_fleet_create_is_atomic_idempotent_and_starts_primary_session(self):
         env = {**os.environ, **self.env, **self.tmux_env, "TMUX": "leaked-client"}
 
-        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma"]
+        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma", "--tmux-server", "nw-gamma"]
         first = subprocess.run(command, env=env, text=True,
                                capture_output=True, check=False)
         second = subprocess.run(command, env=env, text=True,
@@ -541,7 +541,7 @@ esac
             "beta", encoding="utf-8"
         )
         result = subprocess.run(
-            [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma"],
+            [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma", "--tmux-server", "nw-gamma"],
             env={**os.environ, **self.env, **self.tmux_env}, text=True,
             capture_output=True, check=False,
         )
@@ -558,7 +558,7 @@ esac
         (server_dir / "sessions").mkdir(parents=True)
         (server_dir / "sessions" / "unrelated").touch()
         result = subprocess.run(
-            [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma"],
+            [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma", "--tmux-server", "nw-gamma"],
             env={**os.environ, **self.env, **self.tmux_env}, text=True,
             capture_output=True, check=False,
         )
@@ -570,7 +570,7 @@ esac
         self.assertFalse((server_dir / "environment").exists())
 
     def test_orc_fleet_create_can_retry_after_tmux_start_failure(self):
-        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma"]
+        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma", "--tmux-server", "nw-gamma"]
         failed = subprocess.run(
             command,
             env={
@@ -613,7 +613,7 @@ esac
 
     def test_concurrent_local_create_publishes_one_complete_profile(self):
         env = {**os.environ, **self.env, **self.tmux_env}
-        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma"]
+        command = [str(ROOT / "scripts" / "orc"), "fleet", "create", "gamma", "--tmux-server", "nw-gamma"]
         processes = [
             subprocess.Popen(command, env=env, text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)

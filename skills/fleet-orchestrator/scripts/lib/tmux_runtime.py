@@ -62,6 +62,21 @@ def base_cmd() -> list[str]:
     return ["tmux", "-L", server] if server else ["tmux"]
 
 
+def pane_scope() -> list[str]:
+    """A selected session is the terminal boundary, including on shared servers."""
+    session = os.environ.get("NW_FLEET_PRIMARY_SESSION", "")
+    if not session:
+        return ["-a"]
+    if not SERVER_RE.fullmatch(session):
+        raise TmuxRuntimeConfigError("invalid fleet primary session")
+    return ["-s", "-t", "=" + session]
+
+
+def window_scope() -> list[str]:
+    scope = pane_scope()
+    return scope[1:] if scope[0] == "-s" else scope
+
+
 def identity() -> str:
     try:
         server, source = configured_server()

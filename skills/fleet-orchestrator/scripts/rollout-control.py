@@ -479,8 +479,10 @@ class ControlPlane:
             }
             return self._panes_cache
         fmt = "#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{window_name}\t#{pane_current_command}\t#{pane_pid}"
+        session = self.env.get("NW_FLEET_PRIMARY_SESSION")
+        scope = ["-s", "-t", "=" + session] if session else ["-a"]
         try:
-            out = subprocess.run([*self._tmux_base(), "list-panes", "-a", "-F", fmt],
+            out = subprocess.run([*self._tmux_base(), "list-panes", *scope, "-F", fmt],
                                  capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             self._panes_cache = {}

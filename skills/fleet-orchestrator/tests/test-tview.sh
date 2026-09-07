@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tview isolation test: a PRIVATE -L server is the isolation
-# boundary (sessions are not), every assertion SAYS what failed, and the
+# tview isolation test: a PRIVATE -L server keeps fixtures away from live
+# terminals; sessions within it are separate fleets. Every assertion SAYS what failed, and the
 # environment is scrubbed - the pre-rework version died silently at `wait`
 # whenever it ran inside a tmux session, because script(1) inherited TMUX
 # and tview asked a private server for a client it never had.
@@ -123,7 +123,8 @@ import sys
 
 rows = json.load(open(sys.argv[1]))
 by_name = {row["name"]: row for row in rows}
-assert set(by_name) == {"primary", sys.argv[2], "offline", "missing"}, rows
+assert set(by_name) == {"primary", sys.argv[2], "offline", "missing", "alternate"}, rows
+assert by_name["alternate"]["status"] == "online", rows
 assert by_name["primary"]["status"] == "online", rows
 assert by_name[sys.argv[2]]["status"] == "online", rows
 assert by_name["offline"]["status"] == "offline", rows
@@ -264,12 +265,12 @@ for _ in {1..50}; do
   [[ -f "$stage/unknown.status" ]] && break
   sleep 0.1
 done
-[[ -f "$stage/unknown.status" && $(cat "$stage/unknown.status") != 0 ]] \
-  || fail "bare tview accepted an unrelated current session group"
-grep -q -- '--list' "$stage/unknown.log" \
-  || fail "unassociated-session error did not explain fleet discovery"
-[[ $(tmux -L "$server" list-clients -F '#{client_tty}|#{session_name}|#{window_index}') == "$same_source_row" ]] \
-  || fail "rejected unrelated session still moved the client"
+[[ -f "$stage/unknown.status" && $(cat "$stage/unknown.status") == 0 ]] \
+  || fail "bare tview did not recognize the native session as its fleet"
+auto_group=$(tmux -L "$server" list-clients -F '#{client_tty}|#{session_group}' \
+  | awk -F'|' -v tty="$same_client_tty" '$1 == tty {print $2}')
+[[ "$auto_group" == alternate ]] \
+  || fail "bare tview followed a stale fleet variable instead of the actual session"
 tmux -L "$server" send-keys -t 'alternate:1' "$stage/same-server-command" Enter
 
 same_target_row=

@@ -29,10 +29,28 @@ for exact arguments. `orc tick --dry-run` previews scheduler actions without
 sending them; a real `tick` may execute configured checks and send task reminders.
 Scheduling belongs to the caller. Do not run a real tick for a status request.
 
-`orc fleet create NAME` creates an isolated local fleet and a tmux session.
-`orc --fleet NAME ...`, `agent-bus --fleet NAME ...`, and `tview --fleet NAME`
-select that same fleet. Named fleet profiles own separate database paths and
-terminal servers; local profiles are bound to the host that created them.
+Ordinary local fleets are native tmux sessions: the session name selects the
+task and message stores. There is no separate local fleet configuration to
+create, synchronize or delete. A session made with native tmux commands is
+discovered too. Existing explicit local/Matrix profiles remain supported for
+compatibility and configured network transports.
+
+```bash
+orc fleet start example       # start or reuse the named tmux session
+tview --fleet example        # enter its existing windows
+orc fleet window example     # add a window; inside it, the name is optional
+orc fleet stop example       # terminate its windows and agents
+```
+
+`create` remains an alias for `start`. Stop closes the session's shared windows
+so grouped viewer sessions cannot keep its agents running. It retires the
+stopped panes' registered identities and retains task/message history. Follow
+any caller-owned checkout/handoff requirements before stopping. Reopening the
+same session name reuses its saved work. Ending a session does not delete its
+history or leave a local configuration file to remove. An ordinary new window
+inherits its workgroup through its session; no environment export or agent
+restart is needed for command selection. Agent registration and model startup
+still use the normal onboarding procedure.
 
 ### Finding and entering fleets
 
@@ -44,8 +62,8 @@ tview --fleet example 3
 tview 3
 ```
 
-The list derives fleet names and primary sessions from the default configuration
-and existing named profiles, then queries those tmux servers. It distinguishes
+The list derives ordinary local fleets from live primary tmux sessions and also
+includes the default configuration and existing explicit profiles. It distinguishes
 an online primary, an offline server, a missing primary session, and invalid or
 unavailable configuration. It never starts a server or creates a session.
 Availability here means tmux availability, not agent responsiveness or task
@@ -55,14 +73,13 @@ Set `fleets.default_name` in the private runtime configuration to give the
 existing default fleet a recognizable alias. Both that alias and `default`
 select the same fleet in `tview`, `orc` and `agent-bus`; no database or message
 transport is moved. `tmux.primary_session` selects its primary session, with
-`0` as the compatible default. Named profiles already record their server and
-primary session, so no second mapping file is needed.
+`0` as the compatible default. This preserves an existing deployment's default
+data and transport while new local sessions receive their own stores.
 
 An explicit `--fleet` always selects that target. Inside tmux, an unselected
 `tview` identifies the fleet from the actual socket and exact primary session
-or its session group, ignoring a stale `NW_FLEET`. An unrelated session is not
-assigned to a fleet by guessing its name: the command displays the list and
-requires an explicit selection. Outside tmux, `NW_FLEET` selects a configured
+or its session group, ignoring a stale `NW_FLEET`. Local sessions on the configured
+server map directly to their names. Outside tmux, `NW_FLEET` selects a configured
 fleet when present; otherwise `tview` enters the default fleet. A positional
 argument remains a window index or exact window name, so `tview 3` keeps its
 meaning. Use `tview --fleet default` to return from a named fleet.

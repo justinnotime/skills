@@ -72,7 +72,7 @@ def agent_panes() -> list[tuple[str, str]]:
     An unreachable configured server is an observation failure, not an empty
     fleet. Callers that make lifecycle decisions must see the RuntimeError.
     """
-    out = tmux_out(["list-panes", "-a", "-F",
+    out = tmux_out(["list-panes", *tmux_runtime.pane_scope(), "-F",
                     "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"
                     "\t#{pane_current_command}\t#{pane_dead}"])
     return parse_agent_pane_rows(out)
@@ -84,7 +84,7 @@ def window_titles() -> list[tuple[str, str]]:
     Window names are seat-authored labels. An unreachable server is UNKNOWN and
     raises; it must not be confused with a reachable server having no windows.
     """
-    out = tmux_out(["list-windows", "-a", "-F",
+    out = tmux_out(["list-windows", *tmux_runtime.window_scope(), "-F",
                     "#{window_index}\t#{window_name}"])
     rows = []
     for line in out.splitlines():

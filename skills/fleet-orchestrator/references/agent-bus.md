@@ -36,6 +36,11 @@ task name without a host prefix or terminal suffix. For a named fleet, retain
 `--fleet <name>` on its commands. Inspect the returned identity, harness, mode
 and pane before reusing a registration.
 
+In ordinary local tmux sessions, boot and bus commands discover the session's
+fleet automatically. An explicit `--fleet` still selects exactly that fleet.
+Use different task names for simultaneous agents; a window belongs to its
+session but does not become a registered message recipient until onboarding.
+
 Onboarding selects `pull` for Codex and `watch` for Claude Code or OpenCode.
 Set `AGENT_BUS_HARNESS` explicitly when the terminal name does not identify the
 harness. A custom harness also requires `AGENT_BUS_MODE`; for a DeepSeek Harness

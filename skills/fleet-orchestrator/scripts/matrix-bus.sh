@@ -28,6 +28,8 @@ export PYTHONDONTWRITEBYTECODE=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="$HERE/lib/fleet-profile.py"
+entry_resolved=0
+if [[ "${1:-}" == --resolved ]]; then entry_resolved=1; shift; fi
 if [[ "${1:-}" == "--config" ]]; then
   (($# >= 3)) || { echo "--config requires a file and a command" >&2; exit 2; }
   export FLEET_ORCHESTRATOR_CONFIG=$2
@@ -37,10 +39,16 @@ if [[ "${1:-}" == "--fleet" ]]; then
   (($# >= 3)) || { echo "usage: matrix-bus.sh --fleet <name> <verb> [...]" >&2; exit 2; }
   fleet=$2
   shift 2
-  exec python3 "$PROFILE" exec "$fleet" -- bash "$0" "$@"
+  exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
 fi
 if [[ -n "${NW_FLEET:-}" && "${NW_FLEET_PROFILE_APPLIED:-}" != "$NW_FLEET" ]]; then
-  exec python3 "$PROFILE" exec "$NW_FLEET" -- bash "$0" "$@"
+  exec python3 "$PROFILE" exec "$NW_FLEET" -- bash "$0" --resolved "$@"
+fi
+if [[ "$entry_resolved" == 0 && -z "${NW_FLEET:-}" && -n "${TMUX:-}" ]]; then
+  fleet=$(python3 "$PROFILE" current)
+  if [[ "$fleet" != default ]]; then
+    exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
+  fi
 fi
 
 ADAPTER="$HERE/agent-bus-v3.py"
@@ -75,11 +83,15 @@ host_prefix() {
 
 tmux_locate() {
   local pids="" p="$PPID" out
+  local scope=(-a)
+  if [[ -n "${NW_FLEET_PRIMARY_SESSION:-}" ]]; then
+    scope=(-s -t "=$NW_FLEET_PRIMARY_SESSION")
+  fi
   while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
     pids="$pids $p"
     p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
   done
-  out=$("${TMUX_CMD[@]}" list-panes -a -F '#{pane_pid} #{session_name}:#{window_index}.#{pane_index} #{window_name}' 2>/dev/null \
+  out=$("${TMUX_CMD[@]}" list-panes "${scope[@]}" -F '#{pane_pid} #{session_name}:#{window_index}.#{pane_index} #{window_name}' 2>/dev/null \
     | while read -r pp loc win; do
         for ancestor in $pids; do
           [ "$ancestor" = "$pp" ] && echo "tmux=$loc win=$win"
