@@ -233,12 +233,31 @@ matches enough to preserve another repository or configuration using the same
 public executable. Configured pre-install commands may have external effects;
 the installer cannot undo those effects when a later step fails.
 
+Before removing or relocating source and configuration files, pause only the
+affected scheduled entries. A program may load configuration before acquiring
+its task lock; holding that lock does not protect a path that disappears during
+the switch. Save the current scheduler configuration privately. For cron, reread
+under the configured installation lock, remove only the exact selected lines,
+and verify unrelated bytes remain unchanged. Release the installation lock,
+allow already-started jobs to finish, and use their existing task locks while
+switching source and installed configuration. Use the equivalent selected-job
+pause for other schedulers; do not stop unrelated jobs.
+
 After authorized installation, read back the actual links, crontab, service
 commands and hook configuration. A configuration file on disk does not prove a
 running service or harness has loaded it. Use the applicable reload, restart or
 hook trust procedure, then observe the new entry in the real invocation path.
 Do not equate a process being present, a successful skip, or a doctor result with
 successful execution of the intended task.
+
+Keep the selected schedules paused until the new paths and configured commands
+pass their checks. Release the task locks, then restore the reviewed replacement
+entries at their original cadence. For cron, reread under the same installation
+lock and preserve unrelated edits made during the pause; do not overwrite the
+whole current crontab with the saved snapshot. Verify the installed bytes and
+the next actual invocation. If switching fails, keep the selected entries paused
+until either the new installation or the matching old source and configuration
+has been restored and checked.
 
 Keep private rollback evidence tying together code versions, installed commands,
 configuration, output and state. Before reverting, check state compatibility
