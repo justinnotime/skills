@@ -15,20 +15,14 @@ if [[ "${1:-}" == "--config" ]]; then
   export FLEET_ORCHESTRATOR_CONFIG=$2
   shift 2
 fi
-if [[ "${1:-}" == "--fleet" ]]; then
-  (($# >= 2)) || { echo "usage: agent-boot.sh --fleet <name> [task-slug]" >&2; exit 2; }
-  fleet=$2
-  shift 2
-  exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
-fi
-if [[ -n "${NW_FLEET:-}" && "${NW_FLEET_PROFILE_APPLIED:-}" != "$NW_FLEET" ]]; then
-  exec python3 "$PROFILE" exec "$NW_FLEET" -- bash "$0" --resolved "$@"
-fi
-if [[ "$entry_resolved" == 0 && -z "${NW_FLEET:-}" && -n "${TMUX:-}" ]]; then
-  fleet=$(python3 "$PROFILE" current)
-  if [[ "$fleet" != default ]]; then
-    exec python3 "$PROFILE" exec "$fleet" -- bash "$0" --resolved "$@"
+if [[ "$entry_resolved" == 0 ]]; then
+  selection=()
+  if [[ "${1:-}" == "--fleet" ]]; then
+    (($# >= 2)) || { echo "--fleet requires a name" >&2; exit 2; }
+    selection=(--fleet "$2")
+    shift 2
   fi
+  exec python3 "$PROFILE" exec-current "${selection[@]}" -- bash "$0" --resolved "$@"
 fi
 
 BUS="$HERE/matrix-bus.sh"

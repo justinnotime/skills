@@ -11,7 +11,6 @@ import json
 import os
 import re
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -31,8 +30,9 @@ def settings() -> dict | None:
     value = cfg.get("seat_trailer")
     if value is None:
         return None
-    required = {"ledger", "members_command", "agent_windows", "host", "trailer_key"}
-    if not isinstance(value, dict) or set(value) != required:
+    required = {"members_command", "agent_windows", "host", "trailer_key"}
+    # The former ledger field is accepted for old caller configurations, but ignored.
+    if not isinstance(value, dict) or set(value) - {"ledger"} != required:
         raise ValueError("invalid attribution configuration")
     for key in ("agent_windows", "members_command"):
         if not isinstance(value[key], list) or any(
@@ -40,10 +40,6 @@ def settings() -> dict | None:
             for item in value[key]
         ):
             raise ValueError("invalid attribution configuration")
-    if value["ledger"] is not None and (
-        not isinstance(value["ledger"], str) or not value["ledger"].strip()
-    ):
-        raise ValueError("invalid attribution configuration")
     if not isinstance(value["trailer_key"], str) or not re.fullmatch(
         r"[A-Za-z][A-Za-z0-9-]*", value["trailer_key"]
     ):
@@ -81,33 +77,7 @@ def pane_locations() -> list[tuple[str, str]]:
     return found
 
 
-def seat_table(config: dict) -> list[dict]:
-    selected = os.environ.get("DISPATCH_LEDGER_DB") or config["ledger"]
-    if not selected:
-        return []
-    path = Path(cfg.expand(selected))
-    try:
-        connection = sqlite3.connect(
-            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2
-        )
-        try:
-            rows = connection.execute(
-                "SELECT agent_id, handle, host, tmux FROM seat WHERE addressable=1"
-            ).fetchall()
-        finally:
-            connection.close()
-    except (OSError, sqlite3.Error):
-        return []
-    return [
-        dict(zip(("agent_id", "handle", "host", "tmux"), row), status="active")
-        for row in rows
-    ]
-
-
 def members(config: dict) -> list[dict]:
-    cached = seat_table(config)
-    if cached:
-        return cached
     command = [cfg.expand(argument) for argument in config["members_command"]]
     if not command:
         return []
@@ -118,14 +88,12 @@ def members(config: dict) -> list[dict]:
         raise RuntimeError("member lookup failed")
     rows = []
     for line in out.stdout.splitlines():
-        if not line.strip().startswith("{"):
+        if not line.strip():
             continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
+        row = json.loads(line)
+        if not isinstance(row, dict) or not isinstance(row.get("agent_id"), str):
+            raise ValueError("invalid member response")
+        rows.append(row)
     return rows
 
 
@@ -144,7 +112,10 @@ def resolve_trailer(config: dict) -> str | None:
         and row["agent_id"]
         and row.get("status") == "active"
         and row.get("host") == host
-        and str(row.get("tmux", "")).startswith(prefixes)
+        and row.get("terminal_presence") not in {"unknown", "absent"}
+        and (row["pane_id"] == os.environ.get("TMUX_PANE")
+             if row.get("pane_id")
+             else str(row.get("tmux", "")).startswith(prefixes))
     }
     location, window = locations[0]
     key = config["trailer_key"]

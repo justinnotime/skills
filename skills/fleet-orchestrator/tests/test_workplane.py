@@ -30,6 +30,7 @@ def setUpModule():
         mock.patch.dict(os.environ, {"FLEET_ORCHESTRATOR_CONFIG": str(_TEST_POLICY)}),
         mock.patch.object(wp, "MERGE_KEYS", policy["authority"]["merge_keys"]),
         mock.patch.object(wp, "SERVICE_HANDLE", policy["authority"]["service_handle"]),
+        mock.patch.object(wp, "read_members", return_value=[]),
     ])
     for context in _TEST_CONTEXT:
         context.start()
@@ -392,8 +393,16 @@ class StoreTestCase(unittest.TestCase):
             "TMUX_PANE": "",
         })
         self._bus_env.start()
+        self._members = mock.patch.object(wp, "read_members", side_effect=self.read_member_fixture)
+        self._members.start()
+
+    def read_member_fixture(self):
+        source = Path(self.tmp.name) / "members.jsonl"
+        return ([json.loads(line) for line in source.read_text().splitlines()]
+                if source.exists() else [])
 
     def tearDown(self):
+        self._members.stop()
         self._bus_env.stop()
         wp.DB_PATH = self._old_db
         wp.CFG = self._old_cfg
@@ -428,6 +437,24 @@ class StoreTestCase(unittest.TestCase):
         self.assertEqual(out.returncode, expect,
                          f"{argv}\nstdout: {out.stdout}\nstderr: {out.stderr}")
         return out.stdout
+
+    def member_source(self, conn):
+        """Expose the fixture through Agent Bus, rather than an ORC disk cache."""
+        members = []
+        for row in conn.execute("SELECT * FROM seat"):
+            member = dict(row)
+            member["aliases"] = [alias for alias in member["aliases"].split(",") if alias]
+            member["addressable"] = bool(member["addressable"])
+            members.append(member)
+        source = Path(self.tmp.name) / "members.jsonl"
+        source.write_text("".join(json.dumps(member) + "\n" for member in members))
+        bus = Path(self.tmp.name) / "member-source.sh"
+        bus.write_text(
+            '#!/bin/sh\nif [ "$1" = members ]; then\n'
+            f'cat "{source}"\nelse\n'
+            f'exec bash "{ROOT / "scripts" / "matrix-bus.sh"}" "$@"\nfi\n')
+        self.env["NW_BUS_CLI"] = str(bus)
+        os.environ["NW_BUS_CLI"] = str(bus)
 
     def task_ids(self):
         out = self.run_cli(LEDGER, "list", "--json", "--all")
@@ -1038,6 +1065,7 @@ class PrLifecycleTests(StoreTestCase):
         with conn:
             self.accept_current_responsibility(
                 conn, pr_id, actual="tmux2", pane="%2")
+        self.member_source(conn)
         conn.close()
         self.env["ORC_SEAT_ID"] = "tmux2"
         self.run_cli(ORC, "verdict", pr_id, "clean", "--note", "seat-key fixture")
@@ -1056,6 +1084,7 @@ class PrLifecycleTests(StoreTestCase):
                 " VALUES ('line-owner-of-example-storage','line-owner','test',?)",
                 (wp.now(),),
             )
+        self.member_source(conn)
         conn.close()
         self.env["ORC_SEAT_ID"] = "tmux1"
         receipt = Path(self.tmp.name) / "receipt.md"
@@ -1070,6 +1099,7 @@ class PrLifecycleTests(StoreTestCase):
                 " AND purpose='receipt-to-keyholder'",
                 (pr_id,),
             )
+        self.member_source(conn)
         conn.close()
         rows = {r["id"]: r for r in self.task_ids()}
         self.assertEqual(rows[pr_id]["state"], "merge-pending")
@@ -2026,6 +2056,7 @@ class OutboxTests(StoreTestCase):
             )
             self.accept_current_responsibility(
                 conn, did, actual="owner", pane="%1")
+        self.member_source(conn)
         with mock.patch.dict(os.environ, {"ORC_SEAT_ID": "owner"}), \
                 mock.patch.object(
                     wp, "bus_send",
@@ -2479,6 +2510,7 @@ class MigrationTests(StoreTestCase):
                          (current,))
             conn.execute("DELETE FROM schema_migration WHERE name="
                          " 'responsibility-versions-v1'")
+        self.member_source(conn)
         conn.close()
 
         upgraded = wp.connect_writable()
@@ -2637,7 +2669,7 @@ class MigrationTests(StoreTestCase):
         ).fetchone()
         self.assertEqual((row["send_state"], row["attempts"]), ("accepted", 2))
 
-    def test_existing_addressable_column_without_cleanup_marker_is_cleared_once(self):
+    def test_old_member_cache_is_ignored_readonly_and_removed_on_write(self):
         old = sqlite3.connect(self.env["DISPATCH_LEDGER_DB"])
         old.execute(
             "CREATE TABLE seat(agent_id TEXT PRIMARY KEY,handle TEXT NOT NULL,"
@@ -2655,7 +2687,9 @@ class MigrationTests(StoreTestCase):
 
         read_only = wp.connect_readonly()
         self.assertEqual(read_only.execute(
-            "SELECT COUNT(*) FROM seat").fetchone()[0], 1)
+            "SELECT COUNT(*) FROM seat").fetchone()[0], 0)
+        self.assertEqual(read_only.execute(
+            "SELECT COUNT(*) FROM main.seat").fetchone()[0], 1)
         self.assertIsNone(read_only.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table'"
             " AND name='schema_migration'").fetchone())
@@ -2664,9 +2698,8 @@ class MigrationTests(StoreTestCase):
         repaired = wp.connect_writable()
         self.assertEqual(repaired.execute(
             "SELECT COUNT(*) FROM seat").fetchone()[0], 0)
-        self.assertEqual(repaired.execute(
-            "SELECT status FROM schema_migration WHERE name="
-            " 'seat-cache-authority-v1'").fetchone()[0], "done")
+        self.assertIsNone(repaired.execute(
+            "SELECT name FROM main.sqlite_master WHERE name='seat'").fetchone())
         repaired.close()
         again = wp.connect_writable()
         self.assertEqual(again.execute(
@@ -2770,6 +2803,7 @@ class ReviewHotfixTests(StoreTestCase):
         row = wp.fetch(conn, did)
         self.assertEqual(wp.attention_recipient(conn, row), "requester")
         self.assertFalse(wp.waits_on_operator(conn, row))
+        self.member_source(conn)
         self.assertNotIn(did, self.run_cli(ORC, "brief"))
 
     def test_responsibility_moves_clear_the_human_question(self):
@@ -3791,8 +3825,9 @@ class SendLegTests(StoreTestCase):
         completed = subprocess.CompletedProcess(
             ["matrix-bus", "members"], 0, stdout=output, stderr=""
         )
-        with mock.patch.object(wp.subprocess, "run", return_value=completed):
-            self.assertTrue(wp.refresh_seats(conn))
+        with mock.patch.object(wp, "read_members", return_value=members):
+            conn = wp.connect_writable()
+            self.assertTrue(wp.members_available(conn))
 
         cached = {
             row["agent_id"]: row["addressable"]
@@ -4517,7 +4552,7 @@ class CheckoutHygieneTests(StoreTestCase):
             mock.patch.object(orc.nw_paths, "lock_path",
                               return_value=Path(self.tmp.name) / "rt" / "tick.lock"),
             mock.patch.object(orc.pane_sense, "agent_panes", return_value=[]),
-            mock.patch.object(wp, "refresh_seats", return_value=True),
+            mock.patch.object(wp, "members_available", return_value=True),
             mock.patch.object(wp, "wake_shadow_off", return_value=True),
             mock.patch.object(wp, "repair_missing_responsibility_messages",
                               return_value=0),
@@ -4588,7 +4623,7 @@ class CheckoutHygieneTests(StoreTestCase):
             mock.patch.object(orc.nw_paths, "lock_path",
                               return_value=Path(self.tmp.name) / "rt" / "tick.lock"),
             mock.patch.object(orc.pane_sense, "agent_panes", return_value=[]),
-            mock.patch.object(wp, "refresh_seats", return_value=True),
+            mock.patch.object(wp, "members_available", return_value=True),
             mock.patch.object(wp, "wake_shadow_off", return_value=True),
             mock.patch.object(wp, "repair_missing_responsibility_messages",
                               return_value=0),
@@ -4644,6 +4679,7 @@ class CheckoutHygieneTests(StoreTestCase):
                          (wp.now(), did))
             self.record_current_voice(
                 conn, did, "note", f"{wp.ASK_NOTE_PREFIX}{question}")
+        self.member_source(conn)
         conn.close()
         orc = self.load_orc()
 
@@ -4670,7 +4706,7 @@ class CheckoutHygieneTests(StoreTestCase):
             mock.patch.object(orc.nw_paths, "lock_path",
                               return_value=Path(self.tmp.name) / "rt" / "tick.lock"),
             mock.patch.object(orc.pane_sense, "agent_panes", return_value=[]),
-            mock.patch.object(wp, "refresh_seats", return_value=True),
+            mock.patch.object(wp, "members_available", return_value=True),
             mock.patch.object(wp, "wake_shadow_off", return_value=True),
             mock.patch.object(wp, "repair_missing_responsibility_messages",
                               return_value=0),
@@ -5232,6 +5268,7 @@ class DependencyGraphTests(StoreTestCase):
             conn.execute("INSERT INTO role_assignment (role, agent_id,"
                          " granted_by, granted_ms) VALUES (?,?,?,?)",
                          ("commander", "cmdr-1", "test", wp.now()))
+        self.member_source(conn)
         conn.close()
         bus = Path(self.tmp.name) / "deadline-bus.sh"
         bus.write_text(
@@ -5255,12 +5292,14 @@ class DependencyGraphTests(StoreTestCase):
         with conn:
             conn.execute("UPDATE event SET at_ms=at_ms-? WHERE dispatch_id=?",
                          (wp.DEADLINE_COOLDOWN_S + 600, late))
+        self.member_source(conn)
         conn.close()
         self.run_cli(ORC, "tick")
         conn = wp.connect_writable()
         keys = [r["dedup_key"] for r in conn.execute(
             "SELECT dedup_key FROM task_msg WHERE task_id=? AND"
             " purpose='escalation' ORDER BY id", (late,))]
+        self.member_source(conn)
         conn.close()
         self.assertEqual(len(keys), 2)
         self.assertIn(f"deadline:{late}:", keys[0])
@@ -6024,6 +6063,7 @@ class ReviewPoolTests(StoreTestCase):
         self.assertEqual([n["target"] for n in notices],
                          ["requester-a", "requester-b"])
         self.assertFalse(wp.waits_on_operator(conn, wp.fetch(conn, did)))
+        self.member_source(conn)
         self.assertNotIn(did, self.run_cli(LEDGER, "brief"))
         with conn:
             conn.execute(
@@ -6559,7 +6599,7 @@ class OwnerDetectTests(StoreTestCase):
         self.assertTrue(rows)
         self.assertFalse(any(r["owner_seat"] == "departed-seat" for r in rows))
         self.assertTrue(any(r["owner_seat"] == "role:commander" for r in rows))
-        self.assertTrue(any("cached seats were ignored" in r["body"] for r in rows))
+        self.assertTrue(any("no stored membership was used" in r["body"] for r in rows))
 
     def test_reassign_verb_audits_and_clears_pool_rotation(self):
         conn = wp.connect_writable()
@@ -7846,6 +7886,7 @@ class CompletionClaimStateTests(StoreTestCase):
             " refreshed_ms) VALUES (?,?,?,?,?)",
             (agent_id, f"test/{agent_id}", status, addressable, wp.now()),
         )
+        self.member_source(conn)
 
     def _grant_commander(self, conn):
         with conn:
@@ -7856,6 +7897,7 @@ class CompletionClaimStateTests(StoreTestCase):
             conn.execute("INSERT INTO role_assignment (role, agent_id,"
                          " granted_by, granted_ms) VALUES (?,?,?,?)",
                          ("commander", self.CMDR, "test", wp.now()))
+        self.member_source(conn)
 
     def load_orc(self):
         import importlib.util
@@ -8159,6 +8201,7 @@ class CompletionClaimStateTests(StoreTestCase):
             conn.execute("UPDATE seat SET status='retired'"
                          " WHERE agent_id='requester-a'")
         self.assertEqual(wp.repair_attention_notifications(conn), 1)
+        self.member_source(conn)
         brief = self.run_cli(LEDGER, "brief")
         self.assertIn("continuation unanswered", brief)
         self.assertNotIn("current recipient could not be verified", brief)
@@ -8363,6 +8406,7 @@ class CompletionClaimStateTests(StoreTestCase):
         self.assertIsNotNone(current)
         self.assertNotEqual(current["id"], first_marker["id"])
         self.assertIn("SECOND round", current["body"])
+        self.member_source(conn)
         brief = self.run_cli(LEDGER, "brief")
         self.assertIn("current recipient could not be verified", brief)
         self.assertIn("SECOND round", brief)
@@ -10699,6 +10743,7 @@ class AnnounceTargetTests(StoreTestCase):
         stub = Path(self.tmp.name) / "bus-stub.sh"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = members ]; then exit 0; fi\n"
             f"echo \"$@\" >> {log}\n"
             "case \"$*\" in *bad-seat*) exit 1;; esac\n"
             "echo '{\"schema\":\"agent-bus/send-result/v3\","

@@ -163,6 +163,109 @@ class SessionFleetTest(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM identities").fetchone()[0], "retired")
         self.tmux("has-session", "-t", "=beta")
 
+    def session_environment(self, name):
+        fields = self.tmux("display-message", "-p", "-t", f"={name}:0.0",
+                           "#{socket_path}|#{pid}|#{session_id}|#{pane_id}").stdout.strip().split("|")
+        return {**self.env, "TMUX": f"{fields[0]},{fields[1]},{fields[2][1:]}", "TMUX_PANE": fields[3]}
+
+    def test_stale_exports_lose_to_actual_session_but_explicit_nested_scope_survives(self):
+        self.native_session("alpha")
+        self.native_session("beta")
+        env = {**self.session_environment("beta"), "NW_FLEET": "alpha",
+               "NW_FLEET_PROFILE_APPLIED": "alpha", "NW_FLEET_PRIMARY_SESSION": "alpha"}
+        actual = json.loads(self.run_command([BUS, "environment"], env=env).stdout)
+        self.assertEqual(actual["database"], self.view("beta")["agent_bus_db"])
+        profile = ROOT / "scripts/lib/fleet-profile.py"
+        nested = self.run_command([sys.executable, profile, "exec", "default", "--",
+                                   "bash", "-c", 'exec "$1" environment', "test", BUS], env=env)
+        self.assertEqual(json.loads(nested.stdout)["database"], str(self.root / "default/bus/inbox.sqlite3"))
+        dead = {**env, "NW_FLEET_COMMAND_SCOPE": "99999999|0|alpha"}
+        actual = json.loads(self.run_command([BUS, "environment"], env=dead).stdout)
+        self.assertEqual(actual["database"], self.view("beta")["agent_bus_db"])
+
+    def test_rename_preserves_running_processes_and_history_after_reopen(self):
+        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.native_session("beta")
+        worker = self.join("alpha", "worker")
+        self.run_command([ORC, "--fleet", "alpha", "open", "--to", "operator",
+                          "--subject", "rename history", "--body", "Synthetic test.", "--no-check"])
+        before = self.view("alpha")
+        pane = self.tmux("list-panes", "-s", "-t", "=alpha", "-F", "#{pane_id}|#{pane_pid}").stdout
+        self.run_command([ORC, "fleet", "rename", "alpha", "gamma"])
+        self.assertEqual(self.tmux("list-panes", "-s", "-t", "=gamma", "-F", "#{pane_id}|#{pane_pid}").stdout, pane)
+        self.assertEqual(self.view("gamma")["agent_bus_db"], before["agent_bus_db"])
+        self.assertEqual(self.view("alpha")["primary_session"], "gamma")
+        self.assertIn(worker, self.bus("gamma", "members").stdout)
+        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.assertNotEqual(self.tmux("has-session", "-t", "=alpha", check=False).returncode, 0)
+        self.run_command([ORC, "fleet", "stop", "gamma"])
+        self.run_command([ORC, "fleet", "start", "gamma"])
+        self.assertIn("rename history", self.run_command([ORC, "--fleet", "gamma", "board"]).stdout)
+        self.assertFalse((self.root / "profiles").exists())
+
+    def test_native_rename_keeps_runtime_and_surviving_group_remains_discoverable(self):
+        self.native_session("alpha")
+        self.native_session("beta")
+        self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-existing")
+        self.join("alpha", "worker")
+        before = self.view("alpha")
+        self.tmux("rename-session", "-t", "=alpha", "gamma")
+        self.assertEqual(self.view("gamma")["agent_bus_db"], before["agent_bus_db"])
+        self.tmux("kill-session", "-t", "=gamma")
+        self.assertEqual(self.view("alpha")["primary_session"], "tview-existing")
+        self.assertEqual(self.view("alpha")["agent_bus_db"], before["agent_bus_db"])
+        self.run_command([ORC, "fleet", "stop", "alpha"])
+        self.assertNotEqual(self.tmux("has-session", "-t", "=tview-existing", check=False).returncode, 0)
+        self.tmux("has-session", "-t", "=beta")
+
+    def test_default_group_survives_native_primary_close(self):
+        self.native_session("0")
+        self.tmux("new-session", "-d", "-t", "0", "-s", "tview-default")
+        self.tmux("kill-session", "-t", "=0")
+        self.assertEqual(self.view("default")["primary_session"], "tview-default")
+        listing = json.loads(self.run_command([ROOT / "scripts/tview", "--list", "--json"]).stdout)
+        default = next(row for row in listing if row["name"] == "default")
+        self.assertEqual(default["status"], "online")
+
+    def test_rename_refuses_different_history_and_runtime_alias_escape(self):
+        self.run_command([ORC, "fleet", "start", "alpha"])
+        (self.root / "fleets/taken").mkdir(parents=True)
+        result = self.run_command([ORC, "fleet", "rename", "alpha", "taken"], check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.tmux("has-session", "-t", "=alpha")
+        (self.root / "fleets/escape").symlink_to(self.root)
+        result = self.run_command([ORC, "fleet", "show", "escape"], check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("inside the runtime directory", result.stderr)
+
+    def test_native_first_task_binds_history_but_readers_and_dry_run_do_not(self):
+        self.native_session("alpha")
+        self.run_command([ORC, "--fleet", "alpha", "board"])
+        self.bus("alpha", "members")
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "")
+        self.run_command([ORC, "--fleet", "alpha", "open", "--to", "operator",
+                          "--subject", "native history", "--body", "Synthetic test.", "--no-check"])
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "alpha")
+        self.tmux("rename-session", "-t", "=alpha", "renamed")
+        self.assertIn("native history", self.run_command([ORC, "--fleet", "renamed", "board"]).stdout)
+        # A reader must not repair even deliberately removed optional metadata.
+        self.tmux("rename-session", "-t", "=renamed", "alpha")
+        self.tmux("set-option", "-u", "-t", "alpha", "@orc-runtime")
+        self.run_command([ORC, "fleet", "tick", "--dry-run"])
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "")
+
+    def test_default_stop_retires_registrations_from_configured_bus_database(self):
+        self.native_session("0")
+        self.native_session("alpha")
+        pane = self.tmux("display-message", "-p", "-t", "=0:0.0", "#{pane_id}").stdout.strip()
+        self.bus("default", "join", "worker", "worker", "test", "pull",
+                 socket.gethostname().split('.')[0], "tmux=0:0.0 win=test",
+                 env={**self.env, "TMUX_PANE": pane})
+        self.run_command([ORC, "fleet", "stop", "default"])
+        with sqlite3.connect(self.root / "default/bus/inbox.sqlite3") as db:
+            self.assertEqual(db.execute("SELECT status FROM identities").fetchone()[0], "retired")
+        self.tmux("has-session", "-t", "=alpha")
+
 
 if __name__ == "__main__":
     unittest.main()

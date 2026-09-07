@@ -280,14 +280,26 @@ def handshake_evidence(conn, task_id: str):
     return None
 
 
-def _pane_probe_for(window: str | None):
+def _registered_pane(member: dict, panes):
+    """Use the identity's exact pane; a split-window neighbour is not its agent."""
+    if member.get("terminal_presence") in {"unknown", "absent"}:
+        return None
+    pane_id = member.get("pane_id")
+    if pane_id:
+        return next((pane for pane in panes if pane[0] == pane_id), None)
+    window = member.get("window") or wp.window_from_tmux_field(member.get("tmux", ""))
+    return pane_sense.pane_for_window(window, panes) if window is not None else None
+
+
+def _pane_probe_for(window: str | None, *, member: dict | None = None):
 
 
     def probe():
         if window is None:
             return None
         try:
-            pane = pane_sense.pane_for_window(window, pane_sense.agent_panes())
+            pane = _registered_pane(member or {"window": window},
+                                    pane_sense.agent_panes())
             if pane is None:
                 return None
             return pane_sense.detect_busy(pane_sense.capture(pane[0]))
@@ -607,7 +619,7 @@ def cmd_reassign(args: argparse.Namespace) -> int:
             and reviewer_arg.endswith(wp.POOL_SUFFIX)
             and row["state"] == "awaiting-review"):
         pool_name = reviewer_arg[5:]
-        if not wp.refresh_seats(conn):
+        if not wp.members_available(conn):
             raise SystemExit(
                 "FAIL  reviewer-pool reassignment needs a current Agent Bus"
                 " registry; assignment was not changed")
@@ -710,7 +722,7 @@ def cmd_claim_done(args: argparse.Namespace) -> int:
 
     conn = wp.connect_writable()
     row = wp.fetch(conn, args.id)
-    registry_fresh = wp.refresh_seats(conn)
+    registry_fresh = wp.members_available(conn)
 
 
     caller = wp.require_owed_caller(conn, row, "claim-done")
@@ -840,24 +852,7 @@ def cmd_announce(args: argparse.Namespace) -> int:
 
 
 def _bus_members(timeout: int = 45) -> list[dict] | None:
-
-
-    try:
-        out = subprocess.run(["bash", wp.bus_cli(), "members"], text=True,
-                             capture_output=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if out.returncode != 0:
-        return None
-    rows = []
-    for line in out.stdout.splitlines():
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(r, dict) and r.get("agent_id"):
-            rows.append(r)
-    return rows or None
+    return wp.read_members(timeout)
 
 
 def _local_hostnames() -> set[str]:
@@ -1080,7 +1075,9 @@ def cmd_topology(args: argparse.Namespace) -> int:
 
 
     conn = wp.connect_readonly()
-    members = _bus_members() or []
+    members = conn.members
+    if members is None:
+        print("WARN  Agent Bus registry unavailable; registered membership is unknown")
     try:
         panes = pane_sense.agent_panes()
     except (RuntimeError, pane_sense.tmux_runtime.TmuxRuntimeConfigError) as exc:
@@ -1094,18 +1091,24 @@ def cmd_topology(args: argparse.Namespace) -> int:
     for pane_id, loc in panes or []:
         if ":" in loc:
             pane_wins[loc.split(":", 1)[1].split(".", 1)[0]] = pane_id
-    active = [m for m in members if m.get("status") == "active"]
-    print(f"=== fleet topology: {len(active)} active seat(s),"
+    active = [m for m in members or [] if m.get("status") == "active"]
+    count = len(active) if members is not None else "?"
+    print(f"=== fleet topology: {count} active seat(s),"
           f" {len(panes) if panes is not None else '?'} agent pane(s) ===")
     for m in sorted(active, key=lambda m: int(wp.window_from_tmux_field(
             m.get("tmux", "")) or 999)):
         win = wp.window_from_tmux_field(m.get("tmux", "")) or "?"
-        pane_state = "pane" if win in pane_wins else "NO PANE"
+        if m.get("host", "") not in _local_hostnames():
+            pane_state = "remote"
+        elif m.get("terminal_presence") == "unknown":
+            pane_state = "location unknown"
+        else:
+            pane_state = "pane" if _registered_pane(m, panes or []) else "NO PANE"
         role_txt = (" roles: " + ",".join(roles.get(m["agent_id"], [])))\
             if roles.get(m["agent_id"]) else ""
         print(f"  win {win:>3}  {m.get('handle','?'):<42} {m.get('harness','?'):<8}"
               f" {m.get('mode','?'):<5} {pane_state}{role_txt}")
-    if panes is not None:
+    if panes is not None and members is not None:
         registered = {wp.window_from_tmux_field(m.get("tmux", "")) for m in active}
         orphan = sorted(set(pane_wins) - registered,
                         key=lambda x: int(x) if x.isdigit() else 0)
@@ -1138,7 +1141,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
         agent_id = handle = ident
         names = {ident}
         print("  NOTE " + ("registry has no such seat"
-                           if members else "registry unavailable")
+                           if members is not None else "registry unavailable")
               + "; matching on the literal only")
 
 
@@ -1505,6 +1508,9 @@ def tick_seat_liveness(conn, dry: bool, *, members=None, panes=None,
                 % ",".join("?" * len(keep)), tuple(keep))
     for seat in mine:
         aid, handle = seat["agent_id"], seat.get("handle", seat["agent_id"])
+        if seat.get("terminal_presence") == "unknown":
+            log(f"WARN seat-liveness: {handle} terminal location unknown; pass skipped")
+            continue
         if watcher_alive(aid):
 
 
@@ -1533,8 +1539,7 @@ def tick_seat_liveness(conn, dry: bool, *, members=None, panes=None,
                                  " probe_ms=0 WHERE agent_id=?", (now, aid))
             log(f"NOTE seat-liveness: {handle} watcher dead again")
             continue
-        window = wp.window_from_tmux_field(seat.get("tmux", ""))
-        pane = pane_sense.pane_for_window(window, panes) if window else None
+        pane = _registered_pane(seat, panes)
         if pane is not None:
             unread = unread_count(aid)
             if unread and now - row["last_nudge_ms"] >= LIVENESS_NUDGE_GAP_S:
@@ -1719,6 +1724,8 @@ def cmd_board(args: argparse.Namespace) -> int:
         print("OK    board empty; this session has no recorded tasks")
         return 0
     conn = wp.connect_readonly()
+    if not wp.members_available(conn):
+        print("WARN  Agent Bus registry unavailable; current recipients are unknown")
     rows = open_tasks(conn)
     if args.repo:
         rows = [r for r in rows
@@ -2482,11 +2489,12 @@ def review_request_unclaimed(conn, row, pane_probe=None) -> bool:
             conn, row, context,
             at_or_after=msg["at_ms"]) is not None):
         return False
-    window = wp.resolve_recipient(conn, actual, row["parent_id"])["window"]
+    resolved = wp.resolve_recipient(conn, actual, row["parent_id"])
+    window = resolved["window"]
     if window is None:
         return False
     if pane_probe is None:
-        pane_probe = _pane_probe_for(window)
+        pane_probe = _pane_probe_for(window, member=resolved)
     return pane_probe() is False
 
 
@@ -2799,7 +2807,7 @@ def tick_pr_autoregister(conn, dry: bool, registry_fresh: bool = True) -> int:
                           f" {owner}." if owner else
                           f"Owner is parked on {fallback} ("
                           + ("the current Agent Bus registry was unavailable;"
-                             " cached seats were ignored"
+                             " no stored membership was used"
                              if not registry_fresh else
                              "no unique window titled with this PR and no"
                              " owner-naming branch")
@@ -3298,25 +3306,28 @@ def cmd_tick(args: argparse.Namespace) -> int:
     route_observation_id = conn.execute(
         "SELECT COALESCE(MAX(id), 0) FROM task_msg"
     ).fetchone()[0]
-    registry_fresh = True
+    registry_fresh = wp.members_available(conn)
     if not dry:
         snap = snapshot_db()
         if snap:
             log(f"OK daily DB snapshot: {snap}")
-        registry_fresh = wp.refresh_seats(conn)
-        if not registry_fresh:
-            log("WARN Agent Bus registry refresh failed; this tick keeps the"
-                " old cache for display only and suppresses every identity-"
-                "dependent pane action")
+    if not registry_fresh:
+        log("WARN Agent Bus registry unavailable; membership is unknown and"
+            " identity-dependent actions are skipped")
 
     tick_parents(
         conn, dry, registry_trusted=(dry or registry_fresh),
         route_observation_id=route_observation_id)
     tick_pr_guards(conn, dry, pool_registry_fresh=(dry or registry_fresh))
     tick_review_reconcile(conn, dry)
-    tick_checkout_hygiene(conn, dry)
+    local_session = (os.environ.get("AGENT_BUS_TRANSPORT") == "local"
+                     and bool(os.environ.get("NW_FLEET_PROFILE_APPLIED"))
+                     and bool(os.environ.get("NW_FLEET_PRIMARY_SESSION"))
+                     and not os.environ.get("NW_FLEET_PROFILE_PATH"))
+    if not local_session:
+        tick_checkout_hygiene(conn, dry)
     if dry or registry_fresh:
-        tick_seat_liveness(conn, dry)
+        tick_seat_liveness(conn, dry, members=conn.members)
     if not dry and not wp.wake_shadow_off():
 
 
@@ -3330,7 +3341,8 @@ def cmd_tick(args: argparse.Namespace) -> int:
         conn, dry, cycle_floor_event_id=cycle_floor_event_id,
         registry_trusted=(dry or registry_fresh),
         route_observation_id=route_observation_id)
-    tick_pr_autoregister(conn, dry, registry_fresh=(dry or registry_fresh))
+    if not local_session:
+        tick_pr_autoregister(conn, dry, registry_fresh=(dry or registry_fresh))
     if dry or registry_fresh:
         tick_reviewer_rotation(
             conn, dry, cycle_floor_event_id=cycle_floor_event_id,
@@ -3369,11 +3381,12 @@ def cmd_tick(args: argparse.Namespace) -> int:
     unknown_windows: set[str] = set()
     for row, context in pairs:
         window = context["window"]
-        if window is None or window in sensed or not tmux_observable:
+        target = context.get("pane_id") or window
+        if window is None or target in sensed or not tmux_observable:
             continue
-        pane = pane_sense.pane_for_window(window, pane_snapshot)
+        pane = _registered_pane(context, pane_snapshot)
         if pane is None:
-            sensed[window] = None
+            sensed[target] = None
             continue
         pane_id, location = pane
         try:
@@ -3381,10 +3394,10 @@ def cmd_tick(args: argparse.Namespace) -> int:
         except RuntimeError as e:
             log(f"WARN capture failed for window {window}: {e};"
                 f" observation unknown, absence counter preserved")
-            unknown_windows.add(window)
+            unknown_windows.add(target)
             continue
         busy = pane_sense.detect_busy(text)
-        sensed[window] = (pane_id, busy)
+        sensed[target] = (pane_id, busy)
 
     fired = escalated = 0
 
@@ -3477,9 +3490,12 @@ def cmd_tick(args: argparse.Namespace) -> int:
                     wp.wake_attempt_resolve(conn, row["id"], seat_key,
                                             "reacted-voice")
         window = context["window"]
-        pane_info = sensed.get(window) if window else None
+        target = context.get("pane_id") or window
+        pane_info = sensed.get(target) if target else None
 
-        if window is not None and (not tmux_observable or window in unknown_windows):
+        if (context.get("terminal_presence") == "unknown"
+                or (window is not None
+                    and (not tmux_observable or target in unknown_windows))):
             if spoke and not dry:
                 save_drive(conn, row["id"], seat_key, generation, entry,
                            absent_ticks)
@@ -3698,6 +3714,9 @@ def refresh_reminder_due(conn, seat_key: str, plan: dict) -> list[tuple[str, str
                      or not wp.dispatch_undelivered(conn, task_id))
                 and context["seat"] == seat_key
                 and str(context.get("window") or "") == str(plan["window"])
+                and (not context.get("pane_id")
+                     or context["pane_id"] == plan["pane_id"])
+                and context.get("terminal_presence") != "unknown"
                 and context["generation"] == generation
                 and drive is not None
                 and drive["st"] in (wp.S_PULLED, wp.S_ESCALATED)
@@ -3903,7 +3922,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(f"OK    tmux observation: {pane_sense.tmux_runtime.identity()},"
               f" {len(panes)} live agent pane(s)")
-    if doctor_truthfulness(wp.connect_readonly(), panes, _bus_members()):
+    conn = wp.connect_readonly()
+    if conn.members is None:
+        print("FAIL  Agent Bus registry unavailable; membership could not be checked")
+        rc = 1
+    if doctor_truthfulness(conn, panes, conn.members):
         rc = 1
     stale = tick_staleness()
     if stale:

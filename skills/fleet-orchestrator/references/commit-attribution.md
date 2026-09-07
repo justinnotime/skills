@@ -11,8 +11,7 @@ Configure the complete `seat_trailer` object to enable attribution:
 ```json
 {
   "seat_trailer": {
-    "ledger": "~/state/example-fleet/tasks.sqlite3",
-    "members_command": ["/path/to/fleet/scripts/agent-bus", "members"],
+    "members_command": ["/path/to/fleet/scripts/matrix-bus.sh", "members"],
     "agent_windows": ["example-agent"],
     "host": "{short_hostname}",
     "trailer_key": "Seat"
@@ -20,21 +19,21 @@ Configure the complete `seat_trailer` object to enable attribution:
 }
 ```
 
-`ledger` may be null; `members_command` may be empty. All fields are explicit.
-The `DISPATCH_LEDGER_DB` override, when present, takes precedence over the
-configured ledger. Paths and command arguments use the fleet configuration's
-`~` and environment expansion. `host` is an exact registry host label;
+`members_command` may be empty. All displayed fields are explicit. The legacy
+`ledger` field is accepted but ignored: ORC no longer stores current membership.
+Command arguments use the fleet configuration's `~` and environment expansion. `host` is an exact registry host label;
 `{short_hostname}` explicitly selects the local hostname before the first dot.
 The window vocabulary and trailer key are consumer policy. An absent object
 leaves commit messages unchanged.
 
 Resolution starts with the inherited `TMUX_PANE`. Every grouped-session alias
 of that pane is considered; a failed configured tmux server is never replaced
-by a different server. Addressable rows from the existing ORC `seat` table are
-read through a read-only SQLite connection. If that view is unavailable or empty,
-the configured member command supplies JSON-lines objects with `agent_id`,
-`handle`, `host`, `tmux`, and `status`. Only active participants on the selected
-host with an exact `tmux=<session:window.pane> ` prefix match.
+by a different server. The configured Agent Bus member command is the only
+membership source and supplies JSON-lines objects with `agent_id`, `handle`,
+`host`, `tmux`, and `status`. Only active participants on the selected host match.
+When a source supplies `pane_id`, it must match the inherited pane exactly;
+otherwise the exact `tmux=<session:window.pane> ` prefix is used. Members with an
+unknown or absent terminal location cannot claim the current pane.
 
 One match produces `Seat: <handle> (<id>)` with the configured key. Multiple
 matches produce an ambiguity record. No match records an unregistered pane only

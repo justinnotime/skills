@@ -57,6 +57,7 @@ PROFILE_ENV_KEYS = (
     "NW_FLEET_PROFILE_APPLIED",
     "NW_FLEET_PROFILE_PATH",
     "NW_FLEET_PRIMARY_SESSION",
+    "NW_FLEET_COMMAND_SCOPE",
     "NW_TMUX_SERVER",
     "NOTES_RUNTIME_DIR",
     "DISPATCH_LEDGER_DB",
@@ -504,18 +505,19 @@ def resolve(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
         _validate_unique(name, profile, env)
         profile_source = str(path)
     else:
-        sessions = local_sessions(env)
-        if name not in sessions and not (runtime_root(env) / name).is_dir():
+        session = local_session(name, env)
+        if session is None and not (runtime_root(env) / name).is_dir():
             raise FleetProfileError(f"fleet {name!r} does not exist: no tmux session or saved work")
         profile = {
             "schema": LOCAL_SCHEMA,
             "tmux_server": _default_tmux_server(env) or "default",
-            "primary_session": name,
+            "primary_session": session["session"] if session else name,
             "local_host": local_hostname(),
         }
         profile_source = ""
 
-    runtime = runtime_root(env) / name
+    runtime = (runtime_root(env) / name if profile_source else
+               local_runtime(name, session, env))
     common = {
         "NW_FLEET": name,
         "NW_FLEET_PROFILE_APPLIED": name,
@@ -565,6 +567,53 @@ def command_env(name: str, base: Mapping[str, str] = os.environ) -> dict[str, st
     for key in PROFILE_ENV_KEYS:
         result.pop(key, None)
     result.update(resolved)
+    return result
+
+
+def _process_identity(pid: int) -> tuple[int, str] | None:
+    """A command override lives only as long as its real ancestor process."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return int(fields[1]), fields[19]
+    except (OSError, ValueError, IndexError):
+        try:
+            result = subprocess.run(["ps", "-p", str(pid), "-o", "ppid=", "-o", "lstart="],
+                                    text=True, capture_output=True, timeout=2)
+            parent, born = result.stdout.strip().split(None, 1)
+            return int(parent), born
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+
+
+def command_selection(explicit: str | None = None,
+                      env: Mapping[str, str] = os.environ) -> str:
+    if explicit is not None:
+        return _canonical_name(explicit, env)
+    scope = env.get("NW_FLEET_COMMAND_SCOPE", "").split("|", 2)
+    if len(scope) == 3 and scope[0].isdigit():
+        owner, birth, selected = int(scope[0]), scope[1], scope[2]
+        pid = os.getpid()
+        for _ in range(128):
+            identity = _process_identity(pid)
+            if identity is None:
+                break
+            parent, actual_birth = identity
+            if pid == owner and birth == actual_birth:
+                return _canonical_name(selected, env)
+            if parent <= 0 or parent == pid:
+                break
+            pid = parent
+    return _canonical_name(terminal_target(env=env)["name"], env)
+
+
+def execution_env(name: str, base: Mapping[str, str] = os.environ) -> dict[str, str]:
+    result = command_env(name, base)
+    identity = _process_identity(os.getpid())
+    if identity is None:
+        raise FleetProfileError("cannot establish this command's fleet selection")
+    result["NW_FLEET_COMMAND_SCOPE"] = f"{os.getpid()}|{identity[1]}|{name}"
+    # All fleets, including the compatible default, observe only their own session.
+    result["NW_FLEET_PRIMARY_SESSION"] = _terminal_target(name, base)["primary_session"]
     return result
 
 
@@ -760,10 +809,16 @@ def _terminal_target(name: str, env: Mapping[str, str]) -> dict[str, str]:
         primary = cfg.get("tmux.primary_session", "0", env=values)
         if not isinstance(primary, str) or not SESSION_RE.fullmatch(primary):
             raise FleetProfileError("invalid tmux.primary_session")
+        try:
+            live = local_session_details(values).get(primary)
+        except FleetProfileError:
+            # Availability is reported by the observation step; an unavailable
+            # server does not make the configured default identity invalid.
+            live = None
         return {
             "name": default_name(values),
             "tmux_server": _default_tmux_server(values) or "default",
-            "primary_session": primary,
+            "primary_session": live["session"] if live else primary,
         }
     values = resolve(canonical, env)
     return {
@@ -790,14 +845,14 @@ def _terminal_tmux(args: list[str], env: Mapping[str, str]):
         raise FleetProfileError("tmux could not be executed") from exc
 
 
-def local_sessions(env: Mapping[str, str] = os.environ) -> dict[str, str]:
-    """Discover primary sessions; tmux owns their lifecycle, not a registry."""
+def local_session_details(env: Mapping[str, str] = os.environ) -> dict[str, dict[str, str]]:
+    """Read live groups once, including groups whose original primary was closed."""
     values = _default_environment(env)
     values.pop("TMUX", None)
     values.pop("TMUX_PANE", None)
     result = _terminal_tmux([
         "-L", _default_tmux_server(env) or "default", "list-sessions", "-F",
-        "#{session_name}\t#{session_group}",
+        "#{session_name}\t#{session_group}\t#{@orc-runtime}\t#{session_id}",
     ], values)
     if result.returncode:
         if any(message in result.stderr.lower() for message in (
@@ -805,17 +860,126 @@ def local_sessions(env: Mapping[str, str] = os.environ) -> dict[str, str]:
         )):
             return {}
         raise FleetProfileError(result.stderr.strip() or "cannot list tmux sessions")
-    sessions = {}
+    groups: dict[str, list[dict[str, str]]] = {}
     for line in result.stdout.splitlines():
         fields = line.split("\t")
-        if len(fields) != 2:
+        if len(fields) != 4:
             continue
-        name, group = fields
-        if NAME_RE.fullmatch(name) and not name.startswith("tview-"):
-            sessions[name] = group
-    # A grouped view is another client view of the same windows.
-    return {name: group for name, group in sessions.items()
-            if not group or group == name or group not in sessions}
+        name, group, key, session_id = fields
+        groups.setdefault(group or session_id, []).append({
+            "session": name, "group": group, "runtime_key": key, "id": session_id,
+        })
+    sessions = {}
+    for rows in groups.values():
+        primaries = [row for row in rows if not row["session"].startswith("tview-")]
+        primary = next((row for row in primaries if row["session"] == row["group"]),
+                       (primaries or rows)[0])
+        name = primary["session"] if primaries else primary["group"]
+        if not NAME_RE.fullmatch(name) or name.startswith("tview-"):
+            continue
+        keys = {row["runtime_key"] for row in rows if row["runtime_key"]}
+        if len(keys) > 1:
+            raise FleetProfileError(f"tmux group {name!r} contains different runtime identities")
+        if name in sessions:
+            raise FleetProfileError(f"multiple tmux groups claim fleet {name!r}")
+        sessions[name] = {**primary, "runtime_key": next(iter(keys), ""),
+                          "ids": " ".join(row["id"] for row in rows)}
+    return sessions
+
+
+def local_sessions(env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    return {name: row["group"] for name, row in local_session_details(env).items()}
+
+
+def local_runtime(name: str, session: Mapping[str, str] | None,
+                  env: Mapping[str, str]) -> Path:
+    """A saved runtime is identity/history; its path never moves during a rename."""
+    root = runtime_root(env).resolve()
+    key = session.get("runtime_key") if session else None
+    key = validate_name(key or name)
+    runtime = (root / key).resolve()
+    if runtime.parent != root:
+        raise FleetProfileError("fleet history alias must stay inside the runtime directory")
+    alias = root / name
+    if session and (alias.exists() or alias.is_symlink()) and alias.resolve() != runtime:
+        raise FleetProfileError(f"session {name!r} conflicts with different saved work")
+    return runtime
+
+
+def local_session(name: str, env: Mapping[str, str]) -> dict[str, str] | None:
+    sessions = local_session_details(env)
+    if name in sessions:
+        selected = sessions[name]
+        runtime = local_runtime(name, selected, env)
+        if any(local_runtime(label, row, env) == runtime
+               for label, row in sessions.items() if row["id"] != selected["id"]):
+            raise FleetProfileError(f"saved work {name!r} is open in multiple sessions")
+        return selected
+    saved = runtime_root(env) / name
+    if not saved.is_dir():
+        return None
+    matches = [row for label, row in sessions.items()
+               if local_runtime(label, row, env) == saved.resolve()]
+    if len(matches) > 1:
+        raise FleetProfileError(f"saved work {name!r} is open in multiple sessions")
+    return matches[0] if matches else None
+
+
+def bind_local_session(name: str, env: Mapping[str, str]) -> None:
+    """Keep one immutable history key on tmux itself, never a copied live registry."""
+    session = local_session(name, env)
+    if session is None:
+        return
+    key = local_runtime(name, session, env).name
+    values = _default_environment(env)
+    values.pop("TMUX", None)
+    commands = []
+    for session_id in session["ids"].split():
+        if commands:
+            commands.append(";")
+        commands.extend(["set-option", "-t", session_id, "@orc-runtime", key])
+    result = _terminal_tmux(["-L", _default_tmux_server(env) or "default", *commands], values)
+    if result.returncode:
+        raise FleetProfileError(result.stderr.strip() or "cannot bind session history")
+
+
+def rename_session(name: str, new_name: str, env: Mapping[str, str] = os.environ) -> None:
+    validate_name(new_name)
+    if _canonical_name(name, env) == "default" or _canonical_name(new_name, env) == "default":
+        raise FleetProfileError("the configured default fleet cannot be renamed here")
+    if profile_path(name, env).exists() or profile_path(new_name, env).exists():
+        raise FleetProfileError("rename applies to automatic local fleets, not explicit profiles")
+    session = local_session(name, env)
+    if session is None:
+        raise FleetProfileError(f"fleet {name!r} has no running session")
+    existing = local_session_details(env).get(new_name)
+    if existing is not None and existing["id"] != session["id"]:
+        raise FleetProfileError(f"session {new_name!r} already exists")
+    runtime = local_runtime(name, session, env)
+    runtime.mkdir(parents=True, exist_ok=True)
+    alias = runtime_root(env) / new_name
+    created = False
+    if alias.exists() or alias.is_symlink():
+        if alias.resolve() != runtime:
+            raise FleetProfileError(f"name {new_name!r} already has different saved work")
+    else:
+        alias.symlink_to(runtime.name, target_is_directory=True)
+        created = True
+    try:
+        bind_local_session(name, env)
+        values = _default_environment(env)
+        values.pop("TMUX", None)
+        result = _terminal_tmux([
+            "-L", _default_tmux_server(env) or "default", "rename-session",
+            "-t", session["id"], new_name,
+        ], values)
+        if result.returncode:
+            raise FleetProfileError(result.stderr.strip() or "cannot rename session")
+    except Exception:
+        if created:
+            alias.unlink()
+        raise
+    print(f"renamed session to {new_name!r}; processes and saved work retained")
 
 
 def create_session(name: str, env: Mapping[str, str] = os.environ) -> None:
@@ -827,12 +991,13 @@ def create_session(name: str, env: Mapping[str, str] = os.environ) -> None:
     values = _default_environment(env)
     values.pop("TMUX", None)
     values.pop("TMUX_PANE", None)
-    if name not in local_sessions(env):
+    if local_session(name, env) is None:
         result = _terminal_tmux([
             "-L", server, "new-session", "-d", "-s", name, "-n", "main",
         ], values)
         if result.returncode and name not in local_sessions(env):
             raise FleetProfileError(result.stderr.strip() or "cannot create tmux session")
+    bind_local_session(name, env)
     print(f"ready tmux session {name!r}; fleet mapping is automatic")
     print(f"attach with: tview --fleet {name}")
 
@@ -876,6 +1041,14 @@ def session_action(action: str, name: str | None,
     selected = command_env(target["name"], env)
 
     database = selected.get("AGENT_BUS_DB")
+    if not database:
+        result = subprocess.run([
+            "bash", str(Path(__file__).resolve().parents[1] / "matrix-bus.sh"),
+            "--fleet", target["name"], "environment",
+        ], env=dict(env), text=True, capture_output=True, check=False, timeout=10)
+        if result.returncode:
+            raise FleetProfileError(result.stderr.strip() or "cannot resolve registration database")
+        database = json.loads(result.stdout)["database"]
     if database and Path(database).is_file():
         with sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True) as db:
             registrations = db.execute(
@@ -1077,9 +1250,17 @@ def parser() -> argparse.ArgumentParser:
             "terminate the session's windows and agents; retain saved work"))
         action_p.add_argument("name", nargs="?")
 
+    rename_p = sub.add_parser("rename", help="rename a local fleet and retain its saved work")
+    rename_p.add_argument("name")
+    rename_p.add_argument("new_name")
+
     exec_p = sub.add_parser("exec", help="run one command in a named fleet")
     exec_p.add_argument("name")
     exec_p.add_argument("command", nargs=argparse.REMAINDER)
+
+    current_p = sub.add_parser("exec-current", help="run in the actual session or an explicit command scope")
+    current_p.add_argument("--fleet")
+    current_p.add_argument("command", nargs=argparse.REMAINDER)
 
     sub.add_parser("current", help="identify this process's tmux-session fleet")
 
@@ -1126,6 +1307,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "terminal":
             target = terminal_target(args.name)
+            selected = _canonical_name(target["name"], os.environ)
+            if selected != "default" and not profile_path(selected).exists():
+                bind_local_session(selected, os.environ)
             print("\t".join(target[key] for key in
                             ("name", "tmux_server", "primary_session")))
             return 0
@@ -1166,6 +1350,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.action in {"window", "stop"}:
             session_action(args.action, args.name)
             return 0
+        if args.action == "rename":
+            rename_session(args.name, args.new_name)
+            return 0
         if args.action == "resolve":
             view = public_view(args.name)
             if args.field:
@@ -1177,13 +1364,14 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(view, sort_keys=True, indent=2))
             return 0
-        if args.action == "exec":
+        if args.action in {"exec", "exec-current"}:
             command = list(args.command)
             if command and command[0] == "--":
                 command.pop(0)
             if not command:
                 raise FleetProfileError("exec needs a command after --")
-            os.execvpe(command[0], command, command_env(args.name))
+            name = args.name if args.action == "exec" else command_selection(args.fleet)
+            os.execvpe(command[0], command, execution_env(name))
         if args.action == "apply-tmux":
             if _canonical_name(args.name, os.environ) == "default":
                 raise FleetProfileError("apply-tmux requires a named fleet")

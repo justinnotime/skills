@@ -50,7 +50,7 @@ class OrcTmuxObservationTest(unittest.TestCase):
                        check=True, capture_output=True, env=self.env)
         with mock.patch.dict(os.environ, self.env, clear=True):
             conn = wp.connect_writable()
-            self.assertTrue(wp.refresh_seats(conn))
+            self.assertTrue(wp.members_available(conn))
             row = conn.execute("SELECT * FROM dispatch").fetchone()
             context = wp.continuation_context(conn, row)
             conn.execute(

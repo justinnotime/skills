@@ -221,7 +221,7 @@ def test_inventory_distinguishes_online_offline_and_missing_primary_without_muta
     assert [(row["name"], row["status"]) for row in rows] == [
         ("primary", "online"), ("alpha", "offline"), ("beta", "missing-primary"),
     ]
-    assert len(seen) == 4  # Native session discovery plus the three configured targets.
+    assert len(seen) == 5  # Discovery, default group recovery, and three target observations.
     assert before == {p.name: p.read_bytes() for p in profiles.iterdir()}
     assert rows[0]["command"] == "tview --fleet primary"
     assert all(set(row) == {"name", "tmux_server", "primary_session", "status", "command", "detail"}

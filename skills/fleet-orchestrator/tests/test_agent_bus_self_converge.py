@@ -235,8 +235,8 @@ class AgentBusSelfConvergeE2E(unittest.TestCase):
         self.freshness = self.scripts / "agent-bus-watcher-freshness.py"
         shutil.copy2(BUS_SOURCE, self.bus)
         shutil.copy2(FRESHNESS_SOURCE, self.freshness)
-        (self.scripts / "lib").mkdir()
-        shutil.copy2(ROOT / "scripts/lib/runtime_config.py", self.scripts / "lib/runtime_config.py")
+        shutil.copytree(ROOT / "scripts/lib", self.scripts / "lib",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         self.cfg = self.stage / "matrix"
         self.cfg.mkdir()
         (self.cfg / "auth.hdr").write_text("Authorization: Bearer staging\n")

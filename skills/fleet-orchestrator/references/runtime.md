@@ -40,6 +40,7 @@ orc fleet start example       # start or reuse the named tmux session
 tview --fleet example        # enter its existing windows
 orc fleet window example     # add a window; inside it, the name is optional
 orc fleet stop example       # terminate its windows and agents
+orc fleet rename example renamed  # keep processes and history under a new name
 ```
 
 `create` remains an alias for `start`. Stop closes the session's shared windows
@@ -52,6 +53,46 @@ inherits its workgroup through its session; no environment export or agent
 restart is needed for command selection. Agent registration and model startup
 still use the normal onboarding procedure.
 
+Each used local session stores one immutable `@orc-runtime` history key on
+tmux itself. `orc fleet rename OLD NEW` records the new name as a relative
+filesystem alias to the original runtime directory and renames the session.
+It never moves a running SQLite database. Old names still reach the same saved
+work; reopening the new name after stop does too. A conflicting session or
+different saved history rejects the rename. History aliases cannot escape the
+configured runtime root.
+
+A raw `tmux rename-session` changes the current display name and keeps its
+running store through that key. It does not record a durable history rename;
+use the ORC rename command when the new name must survive session destruction.
+Raw `tmux kill-session` follows native tmux semantics: linked windows can remain
+alive in grouped viewers. Such a surviving group remains discoverable. Use
+`orc fleet stop` to close the whole group and its agents.
+
+### State authority and scheduling
+
+| State | Authority | Derived view |
+|---|---|---|
+| Live sessions, groups, windows and panes | tmux | Fleet discovery and tview |
+| Identity, registration and messages | Agent Bus | Current terminal location and heartbeat age |
+| Tasks, roles, dependencies and history | ORC task store | Board and continuation decisions |
+| Member lookup for a command | Current Agent Bus response | Private temporary SQL table, discarded with the connection |
+
+There is no member-cache synchronization command. Empty membership is a valid
+observation and replaces any previous view; source failure is unknown, never
+an empty fleet or a reason to trust old cached identities. Opening a read-only
+board does not create or migrate the bus database. A window's existence does
+not register a model, transfer its tasks, or prove that it responds to messages.
+
+Configure one machine schedule to call `orc fleet tick`. It discovers the
+default and live local fleets with existing task databases, runs them with
+bounded concurrency, and uses each task store's existing lock. A slow or failed
+fleet does not prevent another from starting. Newly created shell-only sessions
+need no database or scheduling job. Local fleets process their own recorded work
+and do not import the default fleet's configured GitHub projects or run its
+global repository patrol. Explicit `orc --fleet NAME tick` remains a single-fleet
+command. `orc fleet tick --dry-run` inspects without scheduling writes or sends.
+Explicit legacy/network profiles keep their separately configured schedules.
+
 ### Finding and entering fleets
 
 ```bash
@@ -62,7 +103,7 @@ tview --fleet example 3
 tview 3
 ```
 
-The list derives ordinary local fleets from live primary tmux sessions and also
+The list derives ordinary local fleets from live tmux session groups and also
 includes the default configuration and existing explicit profiles. It distinguishes
 an online primary, an offline server, a missing primary session, and invalid or
 unavailable configuration. It never starts a server or creates a session.
@@ -76,7 +117,10 @@ transport is moved. `tmux.primary_session` selects its primary session, with
 `0` as the compatible default. This preserves an existing deployment's default
 data and transport while new local sessions receive their own stores.
 
-An explicit `--fleet` always selects that target. Inside tmux, an unselected
+An explicit `--fleet` always selects that target. For ORC and Agent Bus it stays
+in effect through that command's child processes, including an explicit default
+selection. A process-scoped marker prevents an old exported selector from
+redirecting a later unrelated command. Inside tmux, an unselected
 `tview` identifies the fleet from the actual socket and exact primary session
 or its session group, ignoring a stale `NW_FLEET`. Local sessions on the configured
 server map directly to their names. Outside tmux, `NW_FLEET` selects a configured

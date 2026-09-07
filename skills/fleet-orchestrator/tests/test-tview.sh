@@ -479,6 +479,13 @@ grep -q -- "--session was removed; choose a fleet and window only" \
   || fail "the retired --session option did not explain the replacement"
 
 # ---- reap prong on the REAL private server ----
+# A different fleet survives solely in a grouped view after its original
+# primary closes. Entering default must not terminate those windows/processes.
+tmux -L "$server" new-session -d -s orphan-parent 'sleep 300'
+tmux -L "$server" new-session -d -t orphan-parent -s tview-unrelated-orphan
+tmux -L "$server" kill-session -t '=orphan-parent'
+orphan_panes=$(tmux -L "$server" list-panes -s -t '=tview-unrelated-orphan' \
+  -F '#{pane_id}|#{pane_pid}')
 # both views are now detached; with a 1s idle bar and 2s of quiet they are
 # reapable - but the kill switch must hold everything, and the primary
 # must survive every pass by construction
@@ -493,11 +500,24 @@ TVIEW_REAP_IDLE_S=1 view_flow d '\0020' \
   || fail "reap flow exited nonzero: $(tail -3 "$stage/d.log" | tr '\n' ' ')"
 after=$(tmux -L "$server" list-sessions -F "$fmt")
 grep -q '^0|' <<<"$after" || fail "the PRIMARY session was reaped: $after"
-live_views=$(grep -c '^tview-' <<<"$after") || true
+live_views=$(awk -F'|' '$1 ~ /^tview-/ && $2 == "0" {n++} END {print n+0}' <<<"$after")
 # the reap pass ran before flow-d created/attached its own view: the two
 # idle detached views from earlier must be gone, flow-d's own view remains
 [[ "$live_views" -le 1 ]] \
   || fail "detached idle views survived the reap: $after"
+tmux -L "$server" has-session -t '=tview-unrelated-orphan' \
+  || fail "entering default reaped another fleet's only surviving view"
+[[ $(tmux -L "$server" list-panes -s -t '=tview-unrelated-orphan' \
+  -F '#{pane_id}|#{pane_pid}') == "$orphan_panes" ]] \
+  || fail "reaping another group changed the orphan fleet's processes"
+
+( sleep 1; printf '\002d' ) \
+  | TERM=xterm-256color TVIEW_REAP_IDLE_S=1 timeout 10 script -qec \
+    "TERM=xterm-256color TMUX= NW_FLEET= $TVIEW --fleet orphan-parent" \
+    /dev/null >"$stage/orphan-entry.log" 2>&1 \
+  || fail "entering the orphan fleet failed: $(tail -3 "$stage/orphan-entry.log" | tr '\n' ' ')"
+tmux -L "$server" has-session -t '=tview-unrelated-orphan' \
+  || fail "entering the orphan fleet reaped its authoritative primary"
 
 # ---- source-code contract (updated for the sanctioned reap) ----
 # kill-session may appear ONLY inside the marked reap block; kill-server

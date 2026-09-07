@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,41 @@ class StandaloneBusTests(unittest.TestCase):
         result = self.run_bus("members", success=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Matrix requires an explicit homeserver", result.stderr)
+
+    def test_members_before_first_join_is_empty_without_creating_state(self):
+        result = self.run_bus("members")
+        self.assertEqual(result.stdout, "")
+        self.assertFalse((self.base / "bus").exists())
+        self.assertFalse((self.base / "state").exists())
+
+    def test_members_does_not_migrate_or_repair_an_existing_database(self):
+        joined = json.loads(self.run_bus(
+            "join", "host/reader", "reader", "test", "pull", "host", "no-tmux"
+        ).stdout)
+        database = self.base / "state" / "bus.sqlite3"
+        with sqlite3.connect(database) as conn:
+            conn.execute("DROP TABLE inbox_signal")
+        before = database.read_bytes()
+        members = [json.loads(line) for line in self.run_bus("members").stdout.splitlines()]
+        self.assertEqual([member["agent_id"] for member in members], [joined["agent_id"]])
+        self.assertEqual(database.read_bytes(), before)
+        with sqlite3.connect(database) as conn:
+            self.assertIsNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE name='inbox_signal'"
+            ).fetchone())
+
+    def test_unreadable_members_are_an_error_not_an_empty_or_repaired_bus(self):
+        database = self.base / "state" / "bus.sqlite3"
+        database.parent.mkdir()
+        for content in (b"not a sqlite database", b""):
+            with self.subTest(content=content):
+                database.write_bytes(content)
+                result = self.run_bus("members", success=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("Agent Bus members unavailable", result.stderr)
+                self.assertEqual(database.read_bytes(), content)
+                self.assertFalse((self.base / "bus").exists())
 
 
 if __name__ == "__main__":

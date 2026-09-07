@@ -69,7 +69,11 @@ class AgentBusV3Test(unittest.TestCase):
         self.state_patch = mock.patch.object(bus, "put_state", side_effect=fake_state)
         self.event_patch = mock.patch.object(bus, "put_event", side_effect=fake_event)
         self.members_patch = mock.patch.object(bus, "room_members", side_effect=lambda: list(self.states.values()))
-        for patcher in (self.sync_patch, self.state_patch, self.event_patch, self.members_patch):
+        self.panes_patch = mock.patch.object(bus.tmux_runtime, "pane_snapshot", side_effect=lambda: {
+            f"%{number}": {"server_id": "synthetic-server", "location": f"0:{number}.0", "dead": False}
+            for number in self.__dict__.get("_slot_panes", {}).values()
+        })
+        for patcher in (self.sync_patch, self.state_patch, self.event_patch, self.members_patch, self.panes_patch):
             patcher.start()
 
     def tearDown(self):
@@ -81,7 +85,7 @@ class AgentBusV3Test(unittest.TestCase):
         if slot not in panes:
             panes[slot] = len(panes) + 1
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), mock.patch.dict(os.environ, {"TMUX_PANE": f"%{panes[slot]}"}):
             bus.cmd_join(argparse.Namespace(handle=handle, slot=slot, harness="test", mode=mode, host="host", tmux=f"tmux=0:{panes[slot]}.0"))
         return json.loads(output.getvalue())
 
@@ -819,6 +823,31 @@ class AgentBusV3Test(unittest.TestCase):
             bus.cmd_notify_claim(argparse.Namespace(host="host", pane="0:2.0"))
         self.assertFalse(json.loads(output.getvalue())["notify"])
 
+    def test_legacy_matrix_notify_keeps_existing_exact_location_binding(self):
+        sender = self.join("host-b/sender-tmux1", "host-b/sender")
+        receiver = self.join("host-b/receiver-tmux2", "host-b/receiver", mode="pull")
+        conn = bus.db()
+        conn.execute(
+            "UPDATE identities SET harness='codex',tmux_server_id=NULL WHERE agent_id=?",
+            (receiver["agent_id"],),
+        )
+        conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            bus.cmd_send(argparse.Namespace(
+                sender=sender["agent_id"], target=receiver["agent_id"], subject="legacy",
+                body="synthetic compatibility message", priority="normal", ttl=3600,
+            ))
+        bus.ingest(receiver["agent_id"], 0)
+        wrong = io.StringIO()
+        right = io.StringIO()
+        with mock.patch.object(bus.tmux_runtime, "pane_snapshot", side_effect=AssertionError("legacy must remain unchanged")):
+            with contextlib.redirect_stdout(wrong):
+                bus.cmd_notify_claim(argparse.Namespace(host="host", pane="0:7.0"))
+            with contextlib.redirect_stdout(right), mock.patch.object(bus, "ingest", return_value=0):
+                bus.cmd_notify_claim(argparse.Namespace(host="host", pane="0:2.0"))
+        self.assertFalse(json.loads(wrong.getvalue())["notify"])
+        self.assertTrue(json.loads(right.getvalue())["notify"])
+
     def test_limited_timeline_preserves_cursor(self):
         agent = self.join("host-b/a-tmux1", "host-b/a")
         conn = bus.db()
@@ -1345,8 +1374,14 @@ class AgentBusLocalTransportTest(unittest.TestCase):
         )
         self.urlopen = self.urlopen_patch.start()
         self.pane = 0
+        self.panes_patch = mock.patch.object(bus.tmux_runtime, "pane_snapshot", side_effect=lambda: {
+            f"%{number}": {"server_id": "synthetic-server", "location": f"0:{number}.0", "dead": False}
+            for number in range(1, self.pane + 1)
+        })
+        self.panes_patch.start()
 
     def tearDown(self):
+        self.panes_patch.stop()
         self.urlopen_patch.stop()
         self.env_patch.stop()
         self.tmp.cleanup()
@@ -1355,7 +1390,7 @@ class AgentBusLocalTransportTest(unittest.TestCase):
         self.pane += 1
         tmux = f"tmux=0:{self.pane}.0 win={harness}"
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), mock.patch.dict(os.environ, {"TMUX_PANE": f"%{self.pane}"}):
             bus.cmd_join(argparse.Namespace(
                 handle=handle,
                 slot=f"slot/{handle}",
@@ -1378,6 +1413,73 @@ class AgentBusLocalTransportTest(unittest.TestCase):
                 ttl=3600,
             ))
         return json.loads(output.getvalue())
+
+    def test_members_read_one_snapshot_without_initializing_the_database(self):
+        joined = self.join("host/reader")
+        output = io.StringIO()
+        with (
+            mock.patch.object(bus, "db", side_effect=AssertionError("unexpected writer")),
+            mock.patch.object(bus, "local_member_rows", wraps=bus.local_member_rows) as read,
+            mock.patch.object(bus.tmux_runtime, "pane_snapshot", wraps=bus.tmux_runtime.pane_snapshot) as observe,
+            contextlib.redirect_stdout(output),
+        ):
+            bus.cmd_members(argparse.Namespace())
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(observe.call_count, 1)
+        self.assertEqual(json.loads(output.getvalue())["agent_id"], joined["agent_id"])
+
+    def test_derived_session_refresh_requires_matching_durable_fleet_scope(self):
+        expected = {
+            "NW_FLEET": "alpha", "NW_FLEET_PRIMARY_SESSION": "renamed",
+            "NW_FLEET_PROFILE_APPLIED": "alpha", "AGENT_BUS_TRANSPORT": "local",
+            "AGENT_BUS_DB": str(bus.DB_PATH),
+        }
+        original = {**expected, "NW_FLEET_PRIMARY_SESSION": "alpha"}
+        with mock.patch.object(bus, "expected_fleet_environment", return_value=expected):
+            with mock.patch.dict(os.environ, original, clear=True):
+                bus.validate_fleet_scope()
+                self.assertEqual(os.environ["NW_FLEET_PRIMARY_SESSION"], "renamed")
+            with mock.patch.dict(os.environ, {**original, "AGENT_BUS_DB": "/other/bus.sqlite3"}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "not fully resolved"):
+                    bus.validate_fleet_scope()
+                self.assertEqual(os.environ["NW_FLEET_PRIMARY_SESSION"], "alpha")
+
+    def test_first_named_local_join_binds_history_before_creating_the_bus(self):
+        profile = mock.Mock()
+        profile.resolve.return_value = {"NW_FLEET_PROFILE_PATH": ""}
+        profile.bind_local_session.side_effect = lambda *_args: self.assertFalse(bus.DB_PATH.exists())
+        with mock.patch.dict(os.environ, {"NW_FLEET": "example"}), \
+                mock.patch.object(bus, "fleet_profile_module", return_value=profile):
+            self.join("host/worker")
+        profile.bind_local_session.assert_called_once()
+        self.assertTrue(bus.DB_PATH.is_file())
+
+    def test_failed_history_binding_does_not_create_registration_state(self):
+        profile = mock.Mock()
+        profile.resolve.return_value = {"NW_FLEET_PROFILE_PATH": ""}
+        profile.bind_local_session.side_effect = RuntimeError("conflicting session identity")
+        with mock.patch.dict(os.environ, {"NW_FLEET": "example"}), \
+                mock.patch.object(bus, "fleet_profile_module", return_value=profile):
+            with self.assertRaisesRegex(RuntimeError, "conflicting session identity"):
+                self.join("host/worker")
+        self.assertFalse(bus.CFG.exists())
+
+    def test_missing_local_registry_is_empty_without_creating_directories(self):
+        self.assertEqual(bus.room_members(), [])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            bus.cmd_members(argparse.Namespace())
+        self.assertEqual(output.getvalue(), "")
+        self.assertFalse(bus.CFG.exists())
+
+    def test_incomplete_registry_is_unavailable_without_schema_migration(self):
+        bus.DB_PATH.parent.mkdir()
+        with sqlite3.connect(bus.DB_PATH) as conn:
+            conn.execute("CREATE TABLE identities(agent_id TEXT)")
+        before = bus.DB_PATH.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "Agent Bus members unavailable"):
+            bus.room_members()
+        self.assertEqual(bus.DB_PATH.read_bytes(), before)
 
     def test_local_end_to_end_never_uses_http(self):
         sender = self.join("host/sender-tmux1")

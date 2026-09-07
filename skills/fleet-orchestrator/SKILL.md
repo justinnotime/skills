@@ -35,13 +35,32 @@ fleets; `default` and its caller-configured alias refer to the same fleet. Insid
 tmux, an unselected `tview` follows the actual associated session, not a stale
 fleet environment variable. Listing and entering do not start offline fleets.
 
-Ordinary local fleets are the primary tmux sessions on the configured server;
+Ordinary local fleets are the live tmux session groups on the configured server;
 their names select separate task and message stores without a fleet profile.
 `orc fleet start NAME` starts or reuses a session, `orc fleet window [NAME]`
 adds a window, and `orc fleet stop [NAME]` terminates its windows and agents,
 including grouped viewer sessions, while retaining saved work. Omitted names
 use the current session. Native tmux sessions are discovered automatically.
+`orc fleet rename OLD NEW` preserves processes and saved work without moving
+open databases. A raw tmux rename changes the live display name; use the ORC
+rename command to retain a new history name after the session ends.
 Follow any caller-owned handoff requirements before an authorized stop.
+
+Tmux owns live topology; Agent Bus owns registration/message facts; ORC owns
+task/role/history facts. ORC reads a fresh connection-local member snapshot,
+never a persistent member cache. Empty membership is valid; a failed read is
+unknown and cannot authorize identity-dependent operations. A terminal's
+presence is derived from its exact pane and tmux server generation, not its
+registration-time window number, and does not prove model responsiveness.
+Bare commands inside tmux follow its actual session. An explicit fleet applies
+to that command and its descendants, not later unrelated commands.
+
+Use one caller-configured `orc fleet tick` schedule for the default fleet and
+live local fleets with saved task databases. It discovers groups each time,
+uses existing per-store engine locks and isolates failures. Local fleets do not
+inherit the default fleet's global project import or repository patrol. Starting
+a fleet needs no separate cron entry. The machine must have this one schedule
+configured; explicit legacy/network profiles retain their caller-owned schedules.
 
 For a status or health request, start with the configured read-only board,
 operator-wait view, task history and diagnostics. Separate these observations:

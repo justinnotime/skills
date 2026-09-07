@@ -13,7 +13,7 @@ fi
 
 if [[ "${1:-}" == "fleet" ]]; then
   (($# >= 2)) || {
-    echo "usage: orc fleet start|window|stop|show|apply-tmux [...]" >&2
+    echo "usage: orc fleet start|window|rename|stop|show|tick [...]" >&2
     exit 2
   }
   action=$2
@@ -22,7 +22,7 @@ if [[ "${1:-}" == "fleet" ]]; then
     create|start)
       exec python3 "$PROFILE" create "$@"
       ;;
-    window|stop)
+    window|stop|rename)
       exec python3 "$PROFILE" "$action" "$@"
       ;;
     show)
@@ -31,29 +31,20 @@ if [[ "${1:-}" == "fleet" ]]; then
     apply-tmux)
       exec python3 "$PROFILE" apply-tmux "$@"
       ;;
+    tick)
+      exec python3 "$HERE/fleet-tick.py" "$@"
+      ;;
     *)
-      echo "usage: orc fleet start|window|stop|show|apply-tmux [...]" >&2
+      echo "usage: orc fleet start|window|rename|stop|show|tick [...]" >&2
       exit 2
       ;;
   esac
 fi
 
+selection=()
 if [[ "${1:-}" == "--fleet" ]]; then
   (($# >= 3)) || { echo "usage: orc --fleet <name> <command> [...]" >&2; exit 2; }
-  fleet=$2
+  selection=(--fleet "$2")
   shift 2
-  exec python3 "$PROFILE" exec "$fleet" -- python3 "$HERE/fleet-orchestrator.py" "$@"
 fi
-
-if [[ -n "${NW_FLEET:-}" && "${NW_FLEET_PROFILE_APPLIED:-}" != "$NW_FLEET" ]]; then
-  exec python3 "$PROFILE" exec "$NW_FLEET" -- python3 "$HERE/fleet-orchestrator.py" "$@"
-fi
-
-if [[ -z "${NW_FLEET:-}" && -n "${TMUX:-}" ]]; then
-  fleet=$(python3 "$PROFILE" current)
-  if [[ "$fleet" != default ]]; then
-    exec python3 "$PROFILE" exec "$fleet" -- python3 "$HERE/fleet-orchestrator.py" "$@"
-  fi
-fi
-
-exec python3 "$HERE/fleet-orchestrator.py" "$@"
+exec python3 "$PROFILE" exec-current "${selection[@]}" -- python3 "$HERE/fleet-orchestrator.py" "$@"

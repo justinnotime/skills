@@ -36,6 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import runtime_config as cfg  # noqa: E402
+import tmux_runtime  # noqa: E402
 
 HS = os.environ.get("MATRIX_BUS_HS", str(cfg.get("matrix.homeserver", "")))
 ROOM = os.environ.get("MATRIX_BUS_ROOM", str(cfg.get("matrix.room", "")))
@@ -96,16 +97,22 @@ def is_local_transport() -> bool:
     return transport_name() == "local"
 
 
-def expected_fleet_environment(name: str) -> dict[str, str]:
-    """Resolve a named fleet through the one profile implementation."""
+def fleet_profile_module():
+    """Load the package's single fleet identity implementation."""
     spec = importlib.util.spec_from_file_location(
         "agent_bus_fleet_profile", FLEET_PROFILE_PATH
     )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load fleet profile resolver: {FLEET_PROFILE_PATH}")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def expected_fleet_environment(name: str) -> dict[str, str]:
+    """Resolve a named fleet through the one profile implementation."""
     try:
-        spec.loader.exec_module(module)
+        module = fleet_profile_module()
         return module.resolve(name, os.environ)
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"named fleet {name!r} profile is invalid: {exc}") from exc
@@ -344,6 +351,38 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def local_member_rows() -> list[sqlite3.Row]:
+    """Read registration facts without creating or migrating persistent state.
+
+    An unstarted bus has no members. An existing unreadable or incompatible
+    database is unavailable, not empty. A single read supplies both identity
+    facts and heartbeat diagnostics for the public member snapshot.
+    """
+    try:
+        DB_PATH.stat()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RuntimeError(f"Agent Bus members unavailable: {exc}") from exc
+    try:
+        with closing(sqlite3.connect(
+            DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=10
+        )) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            cursor = conn.execute("SELECT * FROM identities ORDER BY agent_id")
+            required = {
+                "agent_id", "handle", "aliases_json", "generation", "status",
+                "harness", "mode", "host", "tmux", "updated_ms", "lease_until_ms",
+                "pane_id", "heartbeat_fails", "heartbeat_last_error",
+            }
+            if not required.issubset({column[0] for column in cursor.description}):
+                raise RuntimeError("Agent Bus members unavailable: incomplete identity schema")
+            return cursor.fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        raise RuntimeError(f"Agent Bus members unavailable: {exc}") from exc
+
+
 def _initialize_db(conn: sqlite3.Connection) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -404,6 +443,8 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE identities ADD COLUMN heartbeat_last_error TEXT")
     if "pane_id" not in identity_columns:
         conn.execute("ALTER TABLE identities ADD COLUMN pane_id TEXT")
+    if "tmux_server_id" not in identity_columns:
+        conn.execute("ALTER TABLE identities ADD COLUMN tmux_server_id TEXT")
     if "retired_kind" not in identity_columns:
         conn.execute("ALTER TABLE identities ADD COLUMN retired_kind TEXT")
     conn.execute(
@@ -482,6 +523,11 @@ def validate_fleet_scope() -> None:
     expected = expected_fleet_environment(name)
     mismatched = []
     for key, value in expected.items():
+        if key == "NW_FLEET_PRIMARY_SESSION":
+            # The tmux name is derived from the selected durable fleet identity
+            # and may change while a watcher remains alive. Validate every
+            # durable setting before adopting its current terminal name below.
+            continue
         actual = os.environ.get(key)
         # Matrix was the only transport before this field existed, so an
         # already-running schema-1 fleet may legitimately inherit no explicit
@@ -507,6 +553,8 @@ def validate_fleet_scope() -> None:
             f"named fleet {name!r} is not fully resolved ({fields}); use "
             f"matrix-bus.sh --fleet {name} <verb>"
         )
+    if "NW_FLEET_PRIMARY_SESSION" in expected:
+        os.environ["NW_FLEET_PRIMARY_SESSION"] = expected["NW_FLEET_PRIMARY_SESSION"]
 
 
 def call_with_deadline(fn, deadline_s: float) -> Any:
@@ -601,6 +649,8 @@ def state_content(row: sqlite3.Row) -> dict[str, Any]:
         "generation": row["generation"], "status": row["status"],
         "harness": row["harness"], "mode": row["mode"], "host": row["host"],
         "tmux": row["tmux"], "capabilities": ["v3", "delivery-ack", "processed-ack"],
+        "pane_id": row["pane_id"],
+        "tmux_server_id": row["tmux_server_id"] if "tmux_server_id" in row.keys() else None,
         "updated_at": iso(row["updated_ms"]),
         "lease_until": iso(row["lease_until_ms"]) if row["lease_until_ms"] else None,
     }
@@ -657,8 +707,26 @@ def _join_pane_guard(conn: sqlite3.Connection, slot: str, host: str,
 
 def cmd_join(args: argparse.Namespace) -> None:
     args.harness = validated_harness(args.harness, args.mode, args.tmux)
+    fleet_name = os.environ.get("NW_FLEET", "").strip()
+    if is_local_transport() and fleet_name and fleet_name != "default":
+        profile = fleet_profile_module()
+        selected = profile.resolve(fleet_name, os.environ)
+        if selected and not selected["NW_FLEET_PROFILE_PATH"]:
+            # The first real write records the history key on tmux. Pure member,
+            # board and dry-run queries must never create this identity binding.
+            profile.bind_local_session(fleet_name, os.environ)
     conn = db()
     pane_id = os.environ.get("TMUX_PANE", "").strip() or None
+    server_id = None
+    if pane_id and args.tmux.startswith("tmux="):
+        try:
+            pane = tmux_runtime.pane_snapshot().get(pane_id)
+            if pane and not pane["dead"]:
+                server_id = pane["server_id"]
+        except RuntimeError:
+            # Registration and durable messages remain valid without terminal
+            # visibility. Such a registration cannot be used for tmux routing.
+            pass
     current = conn.execute("SELECT * FROM identities WHERE slot=?", (args.slot,)).fetchone()
     agent_id = current["agent_id"] if current else str(uuid.uuid4())
     with registry_lock(agent_id):
@@ -694,17 +762,17 @@ def cmd_join(args: argparse.Namespace) -> None:
                     aliases = ([current["handle"]] + aliases)[:5]
                     generation += 1
                 conn.execute(
-                    "UPDATE identities SET handle=?,generation=?,status='active',harness=?,mode=?,host=?,tmux=?,pane_id=?,retired_kind=NULL,aliases_json=?,updated_ms=?,lease_until_ms=? WHERE agent_id=?",
+                    "UPDATE identities SET handle=?,generation=?,status='active',harness=?,mode=?,host=?,tmux=?,pane_id=?,tmux_server_id=?,retired_kind=NULL,aliases_json=?,updated_ms=?,lease_until_ms=? WHERE agent_id=?",
                     (args.handle, generation, args.harness, args.mode, args.host, args.tmux,
-                     pane_id, json.dumps(aliases), stamp, stamp + lease_seconds * 1000, current["agent_id"]),
+                     pane_id, server_id, json.dumps(aliases), stamp, stamp + lease_seconds * 1000, current["agent_id"]),
                 )
             else:
                 conn.execute(
                     "INSERT INTO identities(agent_id,slot,handle,generation,status,harness,mode,"
-                    "host,tmux,pane_id,aliases_json,created_ms,updated_ms,lease_until_ms) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "host,tmux,pane_id,tmux_server_id,aliases_json,created_ms,updated_ms,lease_until_ms) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (agent_id, args.slot, args.handle, 1, "active", args.harness, args.mode,
-                     args.host, args.tmux, pane_id, "[]", stamp, stamp, stamp + lease_seconds * 1000),
+                     args.host, args.tmux, pane_id, server_id, "[]", stamp, stamp, stamp + lease_seconds * 1000),
                 )
         except sqlite3.IntegrityError as exc:
             # round 2 (tmux3 barrier repro): two concurrent joins both
@@ -755,9 +823,7 @@ def cmd_retire(args: argparse.Namespace) -> None:
 
 def room_members() -> list[dict[str, Any]]:
     if is_local_transport():
-        with closing(db()) as conn:
-            rows = conn.execute("SELECT * FROM identities ORDER BY agent_id").fetchall()
-            return [state_content(row) for row in rows]
+        return [state_content(row) for row in local_member_rows()]
     result = matrix("GET", f"/_matrix/client/v3/rooms/{encoded(REGISTRY_ROOM)}/state")
     if not isinstance(result, list):
         raise RuntimeError(f"Matrix registry state returned a non-list response: {result}")
@@ -779,11 +845,11 @@ def room_members() -> list[dict[str, Any]]:
     return members
 
 
-def active_members() -> list[dict[str, Any]]:
+def active_members(members: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Return every active, unexpired registry fact."""
     stamp = dt.datetime.now(dt.timezone.utc)
     active = []
-    for member in room_members():
+    for member in room_members() if members is None else members:
         try:
             lease = dt.datetime.fromisoformat((member.get("lease_until") or "").replace("Z", "+00:00"))
         except ValueError:
@@ -793,13 +859,13 @@ def active_members() -> list[dict[str, Any]]:
     return active
 
 
-def addressable_members() -> list[dict[str, Any]]:
+def addressable_members(members: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Return model seats that can receive exact or broadcast messages."""
     # Cron identities have no model and never pull presented messages.  They
     # can send and ingest ACKs, but are absent from collaborator listings and
     # must never turn a broadcast into permanent unread mail.
     return [
-        member for member in active_members()
+        member for member in active_members(members)
         if str(member.get("harness", "")).lower() != "cron"
     ]
 
@@ -860,16 +926,66 @@ def member_view(member: dict[str, Any], local: dict[str, sqlite3.Row], now: dt.d
     return view
 
 
+def local_terminal_view(
+    view: dict[str, Any], panes: dict[str, dict[str, str | bool]] | None,
+) -> dict[str, Any]:
+    """Derive routable terminal location without rewriting registration facts.
+
+    A live pane does not establish agent responsiveness. Missing generations
+    are deliberately not inferred from a stale location or a recycled pane ID.
+    Headless identities retain normal durable-message behavior.
+    """
+    registered = str(view.get("tmux", ""))
+    if not registered.startswith("tmux="):
+        return view
+    view["registration_tmux"] = registered
+    view["tmux"] = ""
+    view["terminal_presence"] = "unknown"
+    pane_id, server_id = view.get("pane_id"), view.get("tmux_server_id")
+    if not pane_id or not server_id:
+        view["terminal_detail"] = "registration has no verified tmux server generation; rejoin to bind this terminal"
+    elif panes is None:
+        view["terminal_detail"] = "tmux observation unavailable"
+    else:
+        pane = panes.get(str(pane_id))
+        if pane is None or pane["server_id"] != server_id or pane["dead"]:
+            view["terminal_presence"] = "absent"
+            view["terminal_detail"] = "registered pane is absent from the selected session and server generation"
+        else:
+            view["terminal_presence"] = "present"
+            view["tmux"] = "tmux=" + str(pane["location"])
+    return view
+
+
+def observe_member_terminals(members: list[dict[str, Any]]) -> dict[str, dict[str, str | bool]] | None:
+    if not any(
+        member.get("pane_id") and member.get("tmux_server_id")
+        and str(member.get("tmux", "")).startswith("tmux=") for member in members
+    ):
+        return {}
+    try:
+        return tmux_runtime.pane_snapshot()
+    except RuntimeError:
+        return None
+
+
 def cmd_members(_args: argparse.Namespace) -> None:
-    with closing(db()) as conn:
-        local = {str(r["agent_id"]): r for r in
-                 conn.execute("SELECT agent_id,heartbeat_fails,heartbeat_last_error FROM identities")}
+    rows = local_member_rows()
+    local = {str(row["agent_id"]): row for row in rows}
+    members = (
+        addressable_members([state_content(row) for row in rows])
+        if is_local_transport() else addressable_members()
+    )
+    panes = observe_member_terminals(members) if is_local_transport() else None
     now = dt.datetime.now(dt.timezone.utc)
     # This command lists collaborators that can receive work. Sender-only
     # service identities remain local for sends and acknowledgements but are
     # not terminal members of the fleet.
-    for member in sorted(addressable_members(), key=lambda m: m.get("handle", "")):
-        print(json.dumps(member_view(member, local, now), separators=(",", ":")))
+    for member in sorted(members, key=lambda m: m.get("handle", "")):
+        view = member_view(member, local, now)
+        if is_local_transport():
+            view = local_terminal_view(view, panes)
+        print(json.dumps(view, separators=(",", ":")))
 
 
 def cmd_heartbeat(args: argparse.Namespace) -> None:
@@ -1576,7 +1692,17 @@ def cmd_notify_claim(args: argparse.Namespace) -> None:
         "SELECT i.* FROM identities i WHERE i.status='active' AND i.mode='pull' AND i.harness='codex' AND i.host=? AND i.lease_until_ms>=?",
         (args.host, stamp),
     ).fetchall()
-    rows = [row for row in rows if row["tmux"].split(" ", 1)[0] == f"tmux={args.pane}"]
+    members = [state_content(row) for row in rows]
+    panes = observe_member_terminals(members)
+    def matches_terminal(member: dict[str, Any]) -> bool:
+        if not is_local_transport() and not member.get("tmux_server_id"):
+            # Preserve the existing network-fleet hook until its owner normally
+            # rejoins and records a server generation. No status read rewrites
+            # these legacy registrations or silently disables their hook.
+            return str(member.get("tmux", "")).split(" ", 1)[0] == f"tmux={args.pane}"
+        return local_terminal_view(member, panes)["tmux"] == f"tmux={args.pane}"
+
+    rows = [row for row, member in zip(rows, members) if matches_terminal(member)]
     if len(rows) != 1:
         print(json.dumps({"notify": False, "reason": "identity-not-unique"}, separators=(",", ":")))
         return

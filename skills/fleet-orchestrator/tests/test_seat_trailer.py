@@ -263,7 +263,7 @@ class SeatTrailerTest(unittest.TestCase):
         # a broken members file makes resolution fail: the wrapper still exits 0
         self.members.write_text("{not json\n")
         out = self.run_hook("fix: thing\n", "0:14.0 codex", via_wrapper=True)
-        self.assertIn("Seat: unregistered codex pane 0:14.0", out)
+        self.assertEqual(out, "fix: thing\n")
         env = dict(
             self.environment(),
             SEAT_TRAILER_MEMBERS="/nonexistent/members",
@@ -298,7 +298,7 @@ class SeatTrailerTest(unittest.TestCase):
             "Seat: ambiguous pane 0:14.0 (node-a/worker-a,node-a/worker-d)", result
         )
 
-    def test_readonly_ledger_precedes_command_and_handles_uri_characters(self):
+    def test_legacy_ledger_never_substitutes_for_unavailable_members(self):
         ledger = Path(self.tmp.name) / "ledger?synthetic#test.sqlite3"
         with sqlite3.connect(ledger) as connection:
             connection.execute(
@@ -315,9 +315,27 @@ class SeatTrailerTest(unittest.TestCase):
         self.configuration.write_text(json.dumps(config))
         before = ledger.read_bytes()
         result = self.run_hook("fix: cache\n", "0:14.0 codex")
-        self.assertIn("Seat: node-a/worker-a (aaaa-1111)", result)
+        self.assertEqual(result, "fix: cache\n")
         self.assertEqual(ledger.read_bytes(), before)
         self.assertFalse(Path(str(ledger) + "-journal").exists())
+
+    def test_configuration_without_ledger_uses_current_bus_members(self):
+        config = json.loads(self.configuration.read_text())
+        del config["seat_trailer"]["ledger"]
+        self.configuration.write_text(json.dumps(config))
+        result = self.run_hook("fix: direct source\n", "0:14.0 codex")
+        self.assertIn("Seat: node-a/worker-a (aaaa-1111)", result)
+
+    def test_exact_pane_uses_current_location_after_window_rename(self):
+        row = {**MEMBERS[0], "pane_id": "%42", "terminal_presence": "present",
+               "tmux": "tmux=renamed:2.0 win=codex"}
+        self.members.write_text(json.dumps(row))
+        result = self.run_hook("fix: moved\n", "renamed:2.0 codex")
+        self.assertIn("Seat: node-a/worker-a (aaaa-1111)", result)
+        row["pane_id"] = "%43"
+        self.members.write_text(json.dumps(row))
+        result = self.run_hook("fix: neighbour\n", "renamed:2.0 codex")
+        self.assertNotIn("aaaa-1111", result)
 
     def test_missing_ledger_is_never_created(self):
         self.run_hook("fix: missing cache\n", "0:14.0 codex")

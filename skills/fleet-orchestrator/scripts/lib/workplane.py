@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -1639,12 +1640,87 @@ def configured_db_path() -> Path:
     return Path(explicit).expanduser() if explicit else DB_PATH
 
 
+class Connection(sqlite3.Connection):
+    """Task history on disk; Agent Bus membership belongs only to this read."""
+
+    members: list[dict] | None = None
+
+
+def read_members(timeout: int = 45) -> list[dict] | None:
+    """An empty registry is valid; unavailable or malformed output is unknown."""
+    try:
+        out = subprocess.run(["bash", bus_cli(), "members"], text=True,
+                             capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    rows = []
+    seen = set()
+    try:
+        for line in out.stdout.splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if (not isinstance(row, dict)
+                    or not isinstance(row.get("agent_id"), str)
+                    or not row["agent_id"]
+                    or row["agent_id"] in seen
+                    or not isinstance(row.get("aliases", []), list)
+                    or any(not isinstance(alias, str)
+                           for alias in row.get("aliases", []))):
+                return None
+            seen.add(row["agent_id"])
+            rows.append(row)
+    except (ValueError, TypeError):
+        return None
+    return rows
+
+
+def _member_snapshot(conn: Connection) -> None:
+    """SQL consumers share one connection-local read, never a persisted copy."""
+    conn.execute("""
+        CREATE TEMP TABLE seat (
+            agent_id TEXT PRIMARY KEY,
+            handle TEXT NOT NULL,
+            aliases TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL DEFAULT '',
+            tmux TEXT NOT NULL DEFAULT '',
+            pane_id TEXT NOT NULL DEFAULT '',
+            terminal_presence TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            addressable INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT '',
+            refreshed_ms INTEGER NOT NULL
+        )
+    """)
+    conn.members = read_members()
+    conn.executemany(
+        "INSERT INTO temp.seat (agent_id,handle,aliases,host,tmux,pane_id,"
+        " terminal_presence,status,addressable,updated_at,refreshed_ms)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(row["agent_id"], str(row.get("handle", "")),
+          ",".join(row.get("aliases") or []), str(row.get("host", "")),
+          str(row.get("tmux", "")), str(row.get("pane_id") or ""),
+          str(row.get("terminal_presence") or ""), str(row.get("status", "")),
+          int(row.get("addressable") is True),
+          str(row.get("updated_at", "")), now())
+         for row in conn.members or []])
+    conn.commit()
+
+
+def members_available(conn: Connection) -> bool:
+    """No refresh operation: membership was read when this connection opened."""
+    return conn.members is not None
+
+
 def connect_readonly() -> sqlite3.Connection:
 
     path = configured_db_path()
     uri = f"{path.resolve().as_uri()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=15)
+    conn = sqlite3.connect(uri, uri=True, timeout=15, factory=Connection)
     conn.row_factory = sqlite3.Row
+    _member_snapshot(conn)
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
@@ -1702,6 +1778,23 @@ def _targets_named_production_db(path: Path) -> bool:
     return False
 
 
+def _bind_local_history() -> None:
+    """First task write fixes the session's history key; queries stay read-only."""
+    name = os.environ.get("NW_FLEET", "")
+    if (not name or name == "default"
+            or os.environ.get("AGENT_BUS_TRANSPORT") != "local"
+            or os.environ.get("NW_FLEET_PROFILE_PATH")
+            or not os.environ.get("NW_FLEET_PRIMARY_SESSION")):
+        return
+    path = SCRIPT_DIR / "lib" / "fleet-profile.py"
+    spec = importlib.util.spec_from_file_location("workplane_fleet_profile", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load fleet profile resolver: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.bind_local_session(name, os.environ)
+
+
 def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
     """A configured installation can write live state; development copies need isolated state."""
 
@@ -1723,8 +1816,9 @@ def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
         )
 
 
+    _bind_local_history()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=timeout)
+    conn = sqlite3.connect(path, timeout=timeout, factory=Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={max(0, int(timeout * 1000))}")
@@ -1796,17 +1890,6 @@ def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
             absent_ticks INTEGER NOT NULL DEFAULT 0,
             updated_ms   INTEGER NOT NULL,
             PRIMARY KEY (task_id, seat)
-        );
-        CREATE TABLE IF NOT EXISTS seat (
-            agent_id     TEXT PRIMARY KEY,
-            handle       TEXT NOT NULL,
-            aliases      TEXT NOT NULL DEFAULT '',
-            host         TEXT NOT NULL DEFAULT '',
-            tmux         TEXT NOT NULL DEFAULT '',
-            status       TEXT NOT NULL DEFAULT '',
-            addressable  INTEGER NOT NULL DEFAULT 0,
-            updated_at   TEXT NOT NULL DEFAULT '',
-            refreshed_ms INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS wake_attempt (
             task_id     TEXT NOT NULL,
@@ -2033,29 +2116,9 @@ def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
                 "UPDATE schema_migration SET status='done'"
                 " WHERE name='cache-refusal-retry-v1'"
             )
-        seat_cols = {r[1] for r in conn.execute("PRAGMA table_info(seat)")}
-        if "addressable" not in seat_cols:
-            conn.execute("ALTER TABLE seat ADD COLUMN addressable"
-                         " INTEGER NOT NULL DEFAULT 0")
-
-
-        seat_cache_migration = conn.execute(
-            "SELECT status FROM schema_migration"
-            " WHERE name='seat-cache-authority-v1'"
-        ).fetchone()
-        if seat_cache_migration is None:
-            conn.execute(
-                "INSERT INTO schema_migration(name,status)"
-                " VALUES ('seat-cache-authority-v1','pending')"
-            )
-            seat_cache_migration = {"status": "pending"}
-        if (seat_cache_migration is not None
-                and seat_cache_migration["status"] == "pending"):
-            conn.execute("DELETE FROM seat")
-            conn.execute(
-                "UPDATE schema_migration SET status='done'"
-                " WHERE name='seat-cache-authority-v1'"
-            )
+        # Membership is owned by Agent Bus. Discard the former durable copy;
+        # old read-only ledgers are shadowed by the TEMP table without mutation.
+        conn.execute("DROP TABLE IF EXISTS main.seat")
 
 
         conn.execute(
@@ -2155,6 +2218,7 @@ def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
             END;
             """
         )
+    _member_snapshot(conn)
     return conn
 
 
@@ -2529,41 +2593,6 @@ def merge_key_role(repo: str) -> str:
     return MERGE_KEYS.get(bare_repo(repo), OPERATOR_ROLE)
 
 
-def refresh_seats(conn: sqlite3.Connection, timeout: int = 45) -> bool:
-
-
-    bus = bus_cli()
-    try:
-        out = subprocess.run(["bash", bus, "members"], text=True,
-                             capture_output=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if out.returncode != 0:
-        return False
-    rows = []
-    for line in out.stdout.splitlines():
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if not r.get("agent_id"):
-            continue
-        rows.append((r["agent_id"], str(r.get("handle", "")),
-                     ",".join(r.get("aliases") or []), str(r.get("host", "")),
-                     str(r.get("tmux", "")), str(r.get("status", "")),
-                     int(r.get("addressable") is True),
-                     str(r.get("updated_at", "")), now()))
-    if not rows:
-        return False
-    with conn:
-        conn.execute("DELETE FROM seat")
-        conn.executemany(
-            "INSERT OR REPLACE INTO seat (agent_id, handle, aliases, host, tmux,"
-            " status, addressable, updated_at, refreshed_ms)"
-            " VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    return True
-
-
 def window_from_tmux_field(tmux_field: str) -> str | None:
 
     m = re.search(r"tmux=[^:\s]+:(\d+)\.", tmux_field or "")
@@ -2628,12 +2657,12 @@ def resolve_recipient(conn: sqlite3.Connection, recipient: str,
 
             elif len(hits) > 1:
                 deferred = (f"recipient {recipient!r} matches {len(hits)}"
-                            " cached addressable Agent Bus identities")
+                            " addressable Agent Bus identities")
             elif all_hits:
-                deferred = (f"recipient {recipient!r} only matches cached"
+                deferred = (f"recipient {recipient!r} only matches Agent Bus"
                             " identities that are not addressable")
     if agent_id:
-        seat_row = conn.execute("SELECT tmux,host,addressable FROM seat"
+        seat_row = conn.execute("SELECT tmux,host,addressable,pane_id,terminal_presence FROM seat"
                                 " WHERE agent_id=?",
                                 (agent_id,)).fetchone()
         if seat_row is None:
@@ -2652,6 +2681,8 @@ def resolve_recipient(conn: sqlite3.Connection, recipient: str,
 
 
         return {"seat": agent_id, "window": window if local else None,
+                "pane_id": seat_row["pane_id"] if local else "",
+                "terminal_presence": seat_row["terminal_presence"] if local else "",
                 "agent_id": agent_id, "transport_target": transport_target}
     if deferred:
         return {"seat": recipient or "unknown", "window": None,
@@ -3957,7 +3988,7 @@ def bus_send(conn: sqlite3.Connection, msg_row_id: int,
         if target[5:].endswith(POOL_SUFFIX):
 
 
-            if not refresh_seats(conn):
+            if not members_available(conn):
                 with conn:
                     conn.execute("UPDATE task_msg SET last_error=? WHERE id=?",
                                  ("reviewer pool awaits a current Agent Bus"

@@ -41,6 +41,21 @@ fleet automatically. An explicit `--fleet` still selects exactly that fleet.
 Use different task names for simultaneous agents; a window belongs to its
 session but does not become a registered message recipient until onboarding.
 
+Local member inspection reads the existing database without creating or
+migrating it. A missing database means no registrations; an unreadable or
+incomplete database is an error. Current terminal locations are derived from
+the exact registered pane and tmux server generation, so renaming a session or
+renumbering windows does not move a message to another agent. `registration_tmux`
+preserves the original fact; `terminal_presence` reports present, absent or
+unknown. Present means that terminal exists, not that the model is responsive.
+
+Old local registrations without a server binding report unknown until normal
+onboarding binds the real terminal again. No peer identity is silently changed.
+Legacy Matrix registrations retain their previous exact terminal checks until
+normal rejoin supplies the stronger binding. Resident watchers refresh a
+derived session name only after their durable database/transport selection
+still matches; a rename does not authorize a move to a different message store.
+
 Onboarding selects `pull` for Codex and `watch` for Claude Code or OpenCode.
 Set `AGENT_BUS_HARNESS` explicitly when the terminal name does not identify the
 harness. A custom harness also requires `AGENT_BUS_MODE`; for a DeepSeek Harness

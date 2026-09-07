@@ -36,7 +36,9 @@ case "$1" in
   list-sessions)
     # -F '#{session_name}|#{session_group}' for the group lookup, or the
     # reap format with attached|activity - serve by requested format
-    if [[ "$*" == *session_group* ]]; then
+    if [[ "$*" == *session_activity* ]]; then
+      awk -F'|' '{print $1"|"$2"|"$3"|"(NF >= 4 ? $4 : "0")}' "$TMUX_STUB_SESSIONS"
+    elif [[ "$*" == *session_group* ]]; then
       awk -F'|' '{print $1"|0"}' "$TMUX_STUB_SESSIONS"
     else
       cat "$TMUX_STUB_SESSIONS"
@@ -98,5 +100,11 @@ grep -q '^kill-session -t =tview-primary$' "$TMP/calls.log" \
   && fail "the configured tview-* primary must never be reaped"
 grep -q '^kill-session -t =tview-user-old$' "$TMP/calls.log" \
   || fail "protecting a tview-* primary must still reap an old detached view"
+
+# scenario 5: another group's only surviving view is never this entry's cleanup.
+printf '%s\n' "tview-unrelated-orphan|0|$OLD|other-group" >> "$TMP/sessions.txt"
+run_tview env
+grep -q '^kill-session -t =tview-unrelated-orphan$' "$TMP/calls.log" \
+  && fail "another group's only surviving view must never be reaped"
 
 echo "tview reap regression: all checks passed"

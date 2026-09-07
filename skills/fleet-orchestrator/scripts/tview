@@ -148,7 +148,7 @@ primary_meta=$(target_tmux list-sessions -F \
   | awk -F'|' -v wanted="$primary" '$1 == wanted {print; exit}')
 IFS='|' read -r _ primary_group primary_id <<<"$primary_meta"
 [[ -n "$primary_group" ]] || primary_group=$primary
-target_socket=$(target_tmux display-message -p -t "=$primary" '#{socket_path}')
+target_socket=$(target_tmux display-message -p -t "$primary_id" '#{socket_path}')
 
 resolved_window=
 if (( window_set )); then
@@ -171,24 +171,24 @@ if (( window_set )); then
   }
 fi
 
-# Reap ONLY detached tview-* views idle >48h (the
-# Preserve primary sessions by
-# construction): the filter requires the tview- namespace AND zero
-# attached clients AND 48h of inactivity - the primary and every attached
-# view can never match. TVIEW_REAP=off disables the pass entirely.
+# Reap ONLY detached tview-* views in this group idle >48h. Another group's
+# only remaining view may be its primary, so this entry must never reap it.
+# The selected primary and attached views are protected regardless of age.
+# TVIEW_REAP=off disables the pass entirely.
 if [[ "${TVIEW_REAP:-on}" != "off" ]]; then
   reap_idle_s=${TVIEW_REAP_IDLE_S:-172800}
   now_s=$(date +%s)
-  while IFS='|' read -r name attached activity; do
+  while IFS='|' read -r name attached activity group; do
     case "$name" in tview-*) ;; *) continue ;; esac
     [[ "$name" != "$primary" ]] || continue
+    [[ -n "$group" && "$group" == "$primary_group" ]] || continue
     [[ "$attached" == "0" ]] || continue
     [[ -n "$activity" ]] || continue
     (( now_s - activity > reap_idle_s )) || continue
     target_tmux kill-session -t "=$name" 2>/dev/null \
       && echo "tview: reaped detached view '$name' (idle >$((reap_idle_s / 3600))h)" >&2 \
       || true
-  done < <(target_tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_activity}' 2>/dev/null)
+  done < <(target_tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_activity}|#{session_group}' 2>/dev/null)
 fi
 
 tty_name=$(tty 2>/dev/null || true)
@@ -231,6 +231,12 @@ if target_tmux has-session -t "=$view" 2>/dev/null; then
 else
   target_tmux new-session -d -t "=$primary" -s "$view"
   target_tmux set-option -t "$view" destroy-unattached off
+fi
+# The runtime identity survives a primary-session rename or close. This option
+# records identity, not a second copy of window/session availability.
+runtime_key=$(target_tmux show-options -qv -t "$primary_id" @orc-runtime)
+if [[ -n "$runtime_key" ]]; then
+  target_tmux set-option -t "$view" @orc-runtime "$runtime_key"
 fi
 
 target=$view
