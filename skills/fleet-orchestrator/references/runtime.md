@@ -34,6 +34,46 @@ Scheduling belongs to the caller. Do not run a real tick for a status request.
 select that same fleet. Named fleet profiles own separate database paths and
 terminal servers; local profiles are bound to the host that created them.
 
+### Finding and entering fleets
+
+```bash
+tview --list
+tview --list --json
+tview --fleet default
+tview --fleet example 3
+tview 3
+```
+
+The list derives fleet names and primary sessions from the default configuration
+and existing named profiles, then queries those tmux servers. It distinguishes
+an online primary, an offline server, a missing primary session, and invalid or
+unavailable configuration. It never starts a server or creates a session.
+Availability here means tmux availability, not agent responsiveness or task
+completion. Grouped terminal views are not additional fleets.
+
+Set `fleets.default_name` in the private runtime configuration to give the
+existing default fleet a recognizable alias. Both that alias and `default`
+select the same fleet in `tview`, `orc` and `agent-bus`; no database or message
+transport is moved. `tmux.primary_session` selects its primary session, with
+`0` as the compatible default. Named profiles already record their server and
+primary session, so no second mapping file is needed.
+
+An explicit `--fleet` always selects that target. Inside tmux, an unselected
+`tview` identifies the fleet from the actual socket and exact primary session
+or its session group, ignoring a stale `NW_FLEET`. An unrelated session is not
+assigned to a fleet by guessing its name: the command displays the list and
+requires an explicit selection. Outside tmux, `NW_FLEET` selects a configured
+fleet when present; otherwise `tview` enters the default fleet. A positional
+argument remains a window index or exact window name, so `tview 3` keeps its
+meaning. Use `tview --fleet default` to return from a named fleet.
+
+Each attached terminal keeps its own grouped view and selected window. Switching
+between servers replaces that terminal's client without destroying either
+primary session or disconnecting other clients. Selecting an offline fleet fails
+explicitly; use the normal authorized fleet creation/start procedure separately.
+
+### Other terminal and deployment commands
+
 See [Agent Bus operations](agent-bus.md) for durable messages. `scripts/agent-tmux-send.py`
 is a separate best-effort terminal sender. It does not provide durable inboxes.
 `scripts/configure-tmux-server.py` verifies a selected server before writing its

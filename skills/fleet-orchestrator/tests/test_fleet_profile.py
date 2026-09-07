@@ -232,7 +232,8 @@ esac
         self.write_profile()
         named = fleet_profile.command_env("alpha", self.env)
         selected = fleet_profile.command_env("default", named)
-        for key in ("NW_FLEET", "NW_FLEET_PROFILE_APPLIED", "NW_TMUX_SERVER",
+        self.assertEqual(selected["NW_TMUX_SERVER"], "default")
+        for key in ("NW_FLEET", "NW_FLEET_PROFILE_APPLIED",
                     "NOTES_RUNTIME_DIR", "MATRIX_BUS_CFG", "DISPATCH_LEDGER_DB",
                     "AGENT_BUS_TRANSPORT", "AGENT_BUS_CFG", "AGENT_BUS_DB",
                     "MATRIX_BUS_ROOM", "MATRIX_BUS_REGISTRY_ROOM"):

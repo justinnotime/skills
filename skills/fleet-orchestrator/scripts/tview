@@ -17,14 +17,18 @@ usage() {
 Usage: tview [WINDOW]
        tview --fleet NAME [WINDOW]
        tview [--fleet NAME] --window WINDOW
+       tview --list [--json]
 
 Attach through a persistent grouped view dedicated to this terminal. The view
 shares windows/processes with the primary session but keeps an independent
 current window. One positional argument always selects a window by index or
-exact name. With no explicit fleet, tview inherits a named NW_FLEET when
-present; otherwise it keeps its original behavior on session 0 of the
-current/default tmux server. A named fleet resolves its isolated tmux server
-and primary session internally; sessions are not part of the public interface.
+exact name. --list shows configured fleets, their primary sessions and current
+availability without starting a server or creating a session. --fleet default
+or its configured alias selects the default fleet explicitly.
+
+Inside tmux, an unselected fleet is identified by the actual socket and session
+group. Outside tmux, NW_FLEET selects a fleet when set; otherwise the default
+fleet is used. An unrecognized tmux session requires an explicit --fleet.
 
 Safety contract: tview never destroys the primary session or ANY attached
 session, and never enables tmux's automatic session destruction. The one
@@ -45,6 +49,8 @@ fleet_set=0
 primary=
 requested_window=
 window_set=0
+list_set=0
+json_set=0
 positionals=()
 while (( $# )); do
   case "$1" in
@@ -61,6 +67,14 @@ while (( $# )); do
       ;;
     --session)
       fail_usage "--session was removed; choose a fleet and window only"
+      ;;
+    --list)
+      list_set=1
+      shift
+      ;;
+    --json)
+      json_set=1
+      shift
       ;;
     --window)
       (( $# >= 2 )) || fail_usage "--window needs an index or name"
@@ -94,33 +108,38 @@ if (( ${#positionals[@]} == 1 )); then
   window_set=1
 fi
 
-target_server=
-if (( fleet_set == 0 )) \
-    && [[ -n ${NW_FLEET:-} && ${NW_FLEET} != default ]]; then
-  fleet=$NW_FLEET
-  fleet_set=1
+if (( list_set )); then
+  (( fleet_set == 0 && window_set == 0 )) \
+    || fail_usage "--list cannot be combined with a fleet or window"
+  list_args=()
+  (( json_set == 0 )) || list_args+=(--json)
+  exec python3 "$FLEET_PROFILE" list "${list_args[@]}"
 fi
-if (( fleet_set )); then
-  [[ -n "$fleet" ]] || fail_usage "fleet name must not be empty"
-  [[ "$fleet" != default ]] \
-    || fail_usage "the default fleet needs no --fleet option"
-  target_server=$(python3 "$FLEET_PROFILE" resolve "$fleet" --field tmux_server)
-  primary=$(python3 "$FLEET_PROFILE" resolve "$fleet" --field primary_session)
-fi
-[[ -n "$primary" ]] || primary=0
+(( json_set == 0 )) || fail_usage "--json requires --list"
 [[ $window_set -eq 0 || -n "$requested_window" ]] \
   || fail_usage "window must not be empty"
 
+terminal_args=()
+if (( fleet_set )); then
+  [[ -n "$fleet" ]] || fail_usage "fleet name must not be empty"
+  terminal_args+=("$fleet")
+fi
+if ! terminal=$(python3 "$FLEET_PROFILE" terminal "${terminal_args[@]}"); then
+  python3 "$FLEET_PROFILE" list >&2 || true
+  exit 2
+fi
+IFS=$'\t' read -r fleet target_server primary <<<"$terminal"
+[[ -n "$fleet" && -n "$target_server" && -n "$primary" ]] || {
+  echo "tview: fleet target is incomplete" >&2
+  exit 2
+}
+
 target_tmux() {
-  if [[ -n "$target_server" ]]; then
-    env -u TMUX "$TMUX_BIN" -L "$target_server" "$@"
-  else
-    "$TMUX_BIN" "$@"
-  fi
+  env -u TMUX "$TMUX_BIN" -L "$target_server" "$@"
 }
 
 target_tmux has-session -t "=$primary" 2>/dev/null || {
-  echo "tview: primary session '$primary' not found" >&2
+  echo "tview: fleet '$fleet' is unavailable; primary session '$primary' not found (see tview --list)" >&2
   exit 1
 }
 
@@ -162,6 +181,7 @@ if [[ "${TVIEW_REAP:-on}" != "off" ]]; then
   now_s=$(date +%s)
   while IFS='|' read -r name attached activity; do
     case "$name" in tview-*) ;; *) continue ;; esac
+    [[ "$name" != "$primary" ]] || continue
     [[ "$attached" == "0" ]] || continue
     [[ -n "$activity" ]] || continue
     (( now_s - activity > reap_idle_s )) || continue
@@ -216,9 +236,9 @@ fi
 target=$view
 if [[ -n "$resolved_window" ]]; then
   target="$view:$resolved_window"
-elif (( inside_tmux )) && [[ "$current_socket" == "$target_socket" ]]; then
-  # Preserve the original behavior, including calls from another session
-  # group: enter the view on the window index from which tview was invoked.
+elif (( inside_tmux )) \
+    && [[ "$current_socket" == "$target_socket" && "$client_group" == "$primary_group" ]]; then
+  # A window index from an unrelated group need not exist in this fleet.
   target="$view:$client_window"
 fi
 
@@ -233,7 +253,4 @@ if (( inside_tmux )); then
   printf -v handoff_command '%q ' "${handoff[@]}"
   exec "$TMUX_BIN" detach-client -E "$handoff_command"
 fi
-if [[ -n "$target_server" ]]; then
-  exec env -u TMUX "$TMUX_BIN" -L "$target_server" attach-session -t "$target"
-fi
-exec "$TMUX_BIN" attach-session -t "$target"
+exec env -u TMUX "$TMUX_BIN" -L "$target_server" attach-session -t "$target"

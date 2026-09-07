@@ -13,6 +13,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+mkdir -p "$TMP/home" "$TMP/fleets"
+printf '%s\n' '{"schema":"fleet-runtime/v1"}' > "$TMP/config.json"
+
 NOW=$(date +%s)
 OLD=$((NOW - 49 * 3600))     # idle 49h: past the 48h bar
 FRESH=$((NOW - 3600))        # idle 1h: kept
@@ -26,6 +29,7 @@ EOF
 
 cat > "$TMP/tmux" <<'EOF'
 #!/usr/bin/env bash
+[[ "${1:-}" == "-L" ]] && shift 2
 echo "$@" >> "$TMUX_STUB_LOG"
 case "$1" in
   has-session) exit 0 ;;
@@ -48,7 +52,10 @@ chmod +x "$TMP/tmux"
 
 run_tview() {
   : > "$TMP/calls.log"
-  TMUX_BIN="$TMP/tmux" TMUX_STUB_LOG="$TMP/calls.log" \
+  HOME="$TMP/home" FLEET_ORCHESTRATOR_CONFIG="$TMP/config.json" \
+    NW_DEFAULT_TMUX_SERVER=test-default NW_FLEET_PROFILE_DIR="$TMP/fleets" \
+    NW_TMUX_SERVER= NW_FLEET_PROFILE_APPLIED= \
+    TMUX_BIN="$TMP/tmux" TMUX_STUB_LOG="$TMP/calls.log" \
     TMUX_STUB_SESSIONS="$TMP/sessions.txt" TMUX= NW_FLEET= \
     "$@" bash "$ROOT/scripts/tview" </dev/null >/dev/null 2>&1 || true
 }
@@ -76,5 +83,20 @@ printf '%s\n' "tview-user-noact|0|" > "$TMP/sessions.txt"
 run_tview env
 grep -q '^kill-session' "$TMP/calls.log" \
   && fail "a view with unknown activity must not be reaped"
+
+# scenario 4: a configured primary may itself use the tview-* namespace.
+# Its exact identity must protect it even when detached and ancient.
+printf '%s\n' \
+  '{"schema":"fleet-runtime/v1","tmux":{"primary_session":"tview-primary"}}' \
+  > "$TMP/config.json"
+cat > "$TMP/sessions.txt" <<EOF
+tview-primary|0|$OLD
+tview-user-old|0|$OLD
+EOF
+run_tview env
+grep -q '^kill-session -t =tview-primary$' "$TMP/calls.log" \
+  && fail "the configured tview-* primary must never be reaped"
+grep -q '^kill-session -t =tview-user-old$' "$TMP/calls.log" \
+  || fail "protecting a tview-* primary must still reap an old detached view"
 
 echo "tview reap regression: all checks passed"

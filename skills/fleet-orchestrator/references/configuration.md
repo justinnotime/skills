@@ -36,7 +36,9 @@ Optional fields:
 | `paths.orchestrator_state`, `paths.lock_directory`, `paths.lock_prefix` | Runtime observations, snapshots, and default-fleet lock locations; an optional filename prefix preserves an existing lock identity |
 | `paths.legacy_drive_state` | Source directory for an explicit legacy-state import |
 | `fleets.profile_directory`, `fleets.runtime_directory`, `fleets.matrix_config_directory` | Named fleet profile and isolated storage roots |
+| `fleets.default_name` | Optional alias for the existing default fleet; defaults to `default`, without creating a profile or changing storage |
 | `tmux.server_file` | Optional terminal server selector |
+| `tmux.primary_session` | Default fleet's exact primary session name; defaults to `0` |
 | `matrix.homeserver`, `matrix.room`, `matrix.registry_room`, `matrix.token_file` | Required caller-selected Matrix service, distinct rooms, and private authorization-header file |
 | `bus.event_namespace` | Matrix event namespace; preserve it when upgrading an existing transport |
 | `bus.dispatcher_template`, `bus.named_dispatcher_template` | Caller-owned service template for an explicitly requested Matrix dispatcher install |
@@ -60,6 +62,15 @@ Existing `NW_*`, `AGENT_BUS_*`, `MATRIX_BUS_*`, `NOTES_RUNTIME_DIR`, and
 not require a particular repository. Named profile commands apply their complete
 environment before importing runtime code; keep the same selector throughout
 an operation.
+
+The default alias uses the same name syntax as named fleets and cannot collide
+with a named profile. Both `--fleet default` and `--fleet <default_name>` select
+the original default configuration, including when leaving an inherited named
+fleet environment. Do not create another named profile to label an existing
+default fleet: a named profile selects separate databases and transport state.
+Terminal selection uses the configured default server selector, or the explicit
+tmux socket name `default` when no selector exists. `NW_DEFAULT_TMUX_SERVER`
+can select that server independently of a named fleet's environment.
 
 Selecting `AGENT_BUS_CFG` or `MATRIX_BUS_CFG` also selects that directory's
 `agent-bus-v3.sqlite3` and `auth.hdr`; an explicit `AGENT_BUS_DB` still takes

@@ -29,6 +29,12 @@ Preserve any named fleet selector on every call. Failure to resolve one fleet
 must not redirect an operation to another. Test or development commands must
 use isolated state rather than an implicit production database.
 
+For terminal entry, use `scripts/tview --list` to discover configured fleets and
+their actual tmux availability. Select `--fleet NAME` explicitly when switching
+fleets; `default` and its caller-configured alias refer to the same fleet. Inside
+tmux, an unselected `tview` follows the actual associated session, not a stale
+fleet environment variable. Listing and entering do not start offline fleets.
+
 For a status or health request, start with the configured read-only board,
 operator-wait view, task history and diagnostics. Separate these observations:
 

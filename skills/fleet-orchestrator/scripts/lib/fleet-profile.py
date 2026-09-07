@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Create and resolve one fully isolated named fleet.
 
-The default fleet intentionally has no profile: callers that do not request a
-named fleet keep their existing environment and behavior.  A named profile is
+The default fleet has no separate profile; its optional display name is an
+alias, not another database or transport. A named profile is
 an all-or-nothing boundary around tmux, ORC state, and Agent Bus state. Matrix
 profiles retain their two-room boundary. Local profiles delete that dependency
 and are valid only on the host that created them. Physical separation avoids a
@@ -118,9 +118,45 @@ def validate_name(name: str) -> str:
     return name
 
 
-def profile_path(name: str, env: Mapping[str, str] = os.environ) -> Path:
+def _default_environment(base: Mapping[str, str]) -> dict[str, str]:
+    """Remove a named selection before reading the default configuration."""
+    result = dict(base)
+    if (result.get("NW_FLEET_PROFILE_APPLIED")
+            or result.get("NW_FLEET", "default") not in {"", "default"}):
+        for key in PROFILE_ENV_KEYS:
+            result.pop(key, None)
+    else:
+        for key in ("NW_FLEET", "NW_FLEET_PROFILE_PATH",
+                    "NW_FLEET_PRIMARY_SESSION"):
+            result.pop(key, None)
+        if (result.get("AGENT_BUS_TRANSPORT", "").strip().lower() == "local"
+                or result.get("AGENT_BUS_CFG")):
+            for key in ("AGENT_BUS_TRANSPORT", "AGENT_BUS_CFG", "AGENT_BUS_DB"):
+                result.pop(key, None)
+    return result
+
+
+def default_name(env: Mapping[str, str] = os.environ) -> str:
+    values = _default_environment(env)
+    name = cfg.get("fleets.default_name", "default", env=values)
+    if not isinstance(name, str):
+        raise FleetProfileError("fleets.default_name must be a fleet name")
     validate_name(name)
-    if name == "default":
+    collision = profile_dir(values) / f"{name}.json"
+    if collision.exists() or collision.is_symlink():
+        raise FleetProfileError(
+            f"default fleet name {name!r} conflicts with a named profile"
+        )
+    return name
+
+
+def _canonical_name(name: str, env: Mapping[str, str]) -> str:
+    validate_name(name)
+    return "default" if name in {"default", default_name(env)} else name
+
+
+def profile_path(name: str, env: Mapping[str, str] = os.environ) -> Path:
+    if _canonical_name(name, env) == "default":
         raise FleetProfileError("the default fleet deliberately has no profile")
     return profile_dir(env) / f"{name}.json"
 
@@ -240,6 +276,7 @@ def _validate_profile(
 
 
 def _default_tmux_server(env: Mapping[str, str]) -> str | None:
+    env = _default_environment(env)
     override = env.get("NW_DEFAULT_TMUX_SERVER", "").strip()
     if override:
         if not TMUX_RE.fullmatch(override):
@@ -393,8 +430,7 @@ def create_local_profile(
     env: Mapping[str, str] = os.environ,
 ) -> tuple[Path, bool]:
     """Create one host-bound local profile, or validate the existing profile."""
-    validate_name(name)
-    if name == "default":
+    if _canonical_name(name, env) == "default":
         raise FleetProfileError("the default fleet deliberately has no profile")
     root = _ensure_profile_dir(env)
     path = profile_path(name, env)
@@ -461,7 +497,7 @@ def create_local_profile(
 
 def resolve(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
     """Return the complete environment selection for one named fleet."""
-    validate_name(name)
+    name = _canonical_name(name, env)
     if name == "default":
         return {}
     path = profile_path(name, env)
@@ -503,23 +539,17 @@ def resolve(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
 
 
 def command_env(name: str, base: Mapping[str, str] = os.environ) -> dict[str, str]:
-    result = dict(base)
+    name = _canonical_name(name, base)
     if name == "default":
         # When a named profile produced this environment, remove its complete
         # selection.  In an ordinary legacy environment there is no marker,
         # so explicit manual overrides retain exactly their old meaning.
-        if result.get("NW_FLEET_PROFILE_APPLIED"):
-            for key in PROFILE_ENV_KEYS:
-                result.pop(key, None)
-        else:
-            for key in ("NW_FLEET", "NW_FLEET_PROFILE_PATH",
-                        "NW_FLEET_PRIMARY_SESSION"):
-                result.pop(key, None)
-            if (result.get("AGENT_BUS_TRANSPORT", "").strip().lower() == "local"
-                    or result.get("AGENT_BUS_CFG")):
-                for key in ("AGENT_BUS_TRANSPORT", "AGENT_BUS_CFG", "AGENT_BUS_DB"):
-                    result.pop(key, None)
+        result = _default_environment(base)
+        # Retain TMUX for terminal-client context, but terminal observers
+        # must not follow that socket after selecting default runtime data.
+        result["NW_TMUX_SERVER"] = _default_tmux_server(base) or "default"
         return result
+    result = dict(base)
     resolved = resolve(name, base)
     for key in PROFILE_ENV_KEYS:
         result.pop(key, None)
@@ -705,9 +735,183 @@ def ensure_primary_session(
         os.close(lock_fd)
 
 
+def _terminal_target(name: str, env: Mapping[str, str]) -> dict[str, str]:
+    """Resolve a fleet's terminal without changing its runtime environment."""
+    env = _default_environment(env)
+    canonical = _canonical_name(name, env)
+    if canonical == "default":
+        values = _default_environment(env)
+        primary = cfg.get("tmux.primary_session", "0", env=values)
+        if not isinstance(primary, str) or not SESSION_RE.fullmatch(primary):
+            raise FleetProfileError("invalid tmux.primary_session")
+        return {
+            "name": default_name(values),
+            "tmux_server": _default_tmux_server(values) or "default",
+            "primary_session": primary,
+        }
+    values = resolve(canonical, env)
+    return {
+        "name": canonical,
+        "tmux_server": values["NW_TMUX_SERVER"],
+        "primary_session": values["NW_FLEET_PRIMARY_SESSION"],
+    }
+
+
+def _terminal_tmux(args: list[str], env: Mapping[str, str]):
+    binary = env.get("TMUX_BIN", "tmux").strip()
+    if not binary:
+        raise FleetProfileError("TMUX_BIN must not be empty")
+    try:
+        return subprocess.run(
+            # C keeps errors classifiable; -u keeps tmux from replacing the
+            # tab delimiters with underscores when no client is attached.
+            [binary, "-u", *args], env={**env, "LC_ALL": "C"}, text=True, capture_output=True,
+            check=False, timeout=3,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FleetProfileError("tmux inspection timed out") from exc
+    except OSError as exc:
+        raise FleetProfileError("tmux could not be executed") from exc
+
+
+def _terminal_observation(target: Mapping[str, str], env: Mapping[str, str]):
+    values = dict(env)
+    values.pop("TMUX", None)
+    values.pop("TMUX_PANE", None)
+    result = _terminal_tmux(
+        ["-L", target["tmux_server"], "list-sessions", "-F",
+         "#{session_name}\t#{session_group}\t#{socket_path}"], values,
+    )
+    if result.returncode:
+        diagnostic = result.stderr.lower()
+        missing_server = any(phrase in diagnostic for phrase in (
+            "no server running", "no such file or directory", "connection refused",
+        ))
+        return ("offline" if missing_server else "unavailable"), None
+    valid_rows = 0
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0] or not fields[2]:
+            continue
+        valid_rows += 1
+        if fields[0] != target["primary_session"]:
+            continue
+        return "online", {
+            "session": fields[0], "group": fields[1], "socket": fields[2],
+        }
+    return ("missing-primary" if valid_rows else "unavailable"), None
+
+
+def _configured_names(env: Mapping[str, str]) -> list[str]:
+    # Include the default even when it is invalid, so an inventory does not
+    # silently hide an unavailable configuration.
+    names = ["default"]
+    try:
+        names.extend(path.stem for path in sorted(profile_dir(_default_environment(env)).glob("*.json"))
+                     if path.stem != "default")
+    except OSError as exc:
+        raise FleetProfileError("fleet profiles could not be listed") from exc
+    return names
+
+
+def terminal_inventory(env: Mapping[str, str] = os.environ) -> list[dict[str, str]]:
+    """Return configuration and read-only terminal status, without private paths."""
+    rows = []
+    for name in _configured_names(env):
+        row = {
+            "name": name, "tmux_server": "", "primary_session": "",
+            "status": "invalid", "command": "", "detail": "invalid configuration",
+        }
+        try:
+            target = _terminal_target(name, env)
+            row.update(target)
+            row["command"] = f"tview --fleet {target['name']}"
+            try:
+                status, _ = _terminal_observation(target, env)
+            except FleetProfileError as exc:
+                row.update(status="unavailable", detail=str(exc))
+            else:
+                row.update(status=status, detail={
+                    "online": "", "offline": "tmux server unavailable",
+                    "missing-primary": "configured primary session is missing",
+                    "unavailable": "tmux inspection did not return usable session data",
+                }[status])
+        except (FleetProfileError, ValueError, OSError):
+            # Config and transport diagnostics may contain caller-owned
+            # paths or room IDs; a fleet list does not need those details.
+            pass
+        rows.append(row)
+    return rows
+
+
+def terminal_target(name: str | None = None,
+                    env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """Prefer an explicit fleet, then the actual current terminal association."""
+    if name is not None:
+        return _terminal_target(name, env)
+    if not env.get("TMUX"):
+        return _terminal_target(env.get("NW_FLEET") or "default", env)
+
+    args = ["display-message", "-p"]
+    if env.get("TMUX_PANE"):
+        args.extend(["-t", env["TMUX_PANE"]])
+    args.append("#{socket_path}\t#{session_name}\t#{session_group}")
+    try:
+        result = _terminal_tmux(args, env)
+    except FleetProfileError as exc:
+        raise FleetProfileError(
+            f"{exc}; run tview --list and select --fleet NAME"
+        ) from exc
+    current = result.stdout.rstrip("\n").split("\t")
+    if result.returncode or len(current) != 3 or not current[0] or not current[1]:
+        raise FleetProfileError(
+            "cannot inspect the current tmux session; "
+            "run tview --list and select --fleet NAME"
+        )
+    socket_path, session, group = current
+    matches = []
+    for candidate in _configured_names(env):
+        try:
+            target = _terminal_target(candidate, env)
+            status, actual = _terminal_observation(target, env)
+        except (FleetProfileError, ValueError, OSError):
+            continue
+        if status != "online" or actual["socket"] != socket_path:
+            continue
+        if actual["session"] == session or (group and actual["group"] == group):
+            matches.append(target)
+    if len(matches) != 1:
+        reason = "not associated with a configured fleet" if not matches else "ambiguous"
+        raise FleetProfileError(
+            f"current tmux session is {reason}; "
+            "run tview --list and select --fleet NAME"
+        )
+    return matches[0]
+
+
+def _print_terminal_inventory(rows: list[dict[str, str]]) -> None:
+    columns = [("FLEET", "name"), ("SESSION", "primary_session"),
+               ("STATUS", "status"), ("ENTER", "command")]
+    # Escape control characters even when an invalid filename supplied a row.
+    values = [[json.dumps(row[key], ensure_ascii=False)[1:-1] for _, key in columns]
+              for row in rows]
+    widths = [max([len(title), *(len(row[i]) for row in values)])
+              for i, (title, _) in enumerate(columns)]
+    print("  ".join(title.ljust(width) for (title, _), width in zip(columns, widths)))
+    for row, original in zip(values, rows):
+        print("  ".join(value.ljust(width) for value, width in zip(row, widths)).rstrip())
+        if original["detail"]:
+            print(f"  {original['detail']}")
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="action", required=True)
+
+    terminal_p = sub.add_parser("terminal", help="resolve one terminal fleet")
+    terminal_p.add_argument("name", nargs="?")
+    list_p = sub.add_parser("list", help="list configured fleets and terminal status")
+    list_p.add_argument("--json", action="store_true")
 
     resolve_p = sub.add_parser("resolve", help="validate and print a profile")
     resolve_p.add_argument("name")
@@ -739,8 +943,9 @@ def parser() -> argparse.ArgumentParser:
 
 
 def public_view(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str]:
+    name = _canonical_name(name, env)
     if name == "default":
-        return {"name": "default"}
+        return _terminal_target(name, env)
     values = resolve(name, env)
     view = {
         "name": name,
@@ -771,6 +976,18 @@ def public_view(name: str, env: Mapping[str, str] = os.environ) -> dict[str, str
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.action == "terminal":
+            target = terminal_target(args.name)
+            print("\t".join(target[key] for key in
+                            ("name", "tmux_server", "primary_session")))
+            return 0
+        if args.action == "list":
+            rows = terminal_inventory()
+            if args.json:
+                print(json.dumps(rows, sort_keys=True, indent=2))
+            else:
+                _print_terminal_inventory(rows)
+            return 0
         if args.action == "create":
             path, created = create_local_profile(
                 args.name,
@@ -809,11 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise FleetProfileError("exec needs a command after --")
             os.execvpe(command[0], command, command_env(args.name))
         if args.action == "apply-tmux":
-            if args.name == "default":
+            if _canonical_name(args.name, os.environ) == "default":
                 raise FleetProfileError("apply-tmux requires a named fleet")
             apply_tmux_environment(args.name, dry_run=args.dry_run)
             return 0
-    except FleetProfileError as exc:
+    except (FleetProfileError, ValueError) as exc:
         print(f"fleet-profile: {exc}", file=sys.stderr)
         return 2
     return 2
