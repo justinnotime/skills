@@ -1029,12 +1029,42 @@ def cmd_heartbeat(args: argparse.Namespace) -> None:
 
 
 def cmd_registry_migrate(args: argparse.Namespace) -> None:
+    bind_local = getattr(args, "bind_local_terminals", False)
+    if bind_local and not is_local_transport():
+        fail("--bind-local-terminals requires local transport")
     conn = db(); stamp = now_ms()
     rows = conn.execute(
         "SELECT * FROM identities WHERE status='active' AND lease_until_ms>=? ORDER BY agent_id",
         (stamp,),
     ).fetchall()
     if is_local_transport():
+        bound = []
+        unmatched = []
+        if bind_local:
+            # Explicit transport migration, preserving identities and work.
+            # Never infer a replacement pane from a window number alone.
+            panes = tmux_runtime.pane_snapshot()
+            with conn:
+                for row in rows:
+                    if row["host"] != local_host() or row["tmux_server_id"]:
+                        continue
+                    if not str(row["tmux"]).startswith("tmux="):
+                        continue
+                    pane = panes.get(row["pane_id"])
+                    expected = str(row["tmux"]).split(" ", 1)[0]
+                    if (not pane or pane["dead"]
+                            or expected != "tmux=" + str(pane["location"])):
+                        unmatched.append(row["agent_id"])
+                        continue
+                    changed = conn.execute(
+                        "UPDATE identities SET tmux_server_id=? WHERE agent_id=? "
+                        "AND status='active' AND lease_until_ms>=? "
+                        "AND tmux_server_id IS NULL AND pane_id=? AND tmux=? AND host=?",
+                        (pane["server_id"], row["agent_id"], stamp,
+                         row["pane_id"], row["tmux"], row["host"]),
+                    ).rowcount
+                    if changed:
+                        bound.append(row["agent_id"])
         print(json.dumps({
             "schema": "agent-bus/registry-migrate/v3",
             "transport": "local",
@@ -1042,6 +1072,8 @@ def cmd_registry_migrate(args: argparse.Namespace) -> None:
             "registered": len(rows),
             "published": 0,
             "legacy_published": 0,
+            "bound_local_terminals": bound,
+            "unmatched_local_terminals": unmatched,
         }, separators=(",", ":")))
         return
     published = 0
@@ -2034,7 +2066,7 @@ def parser() -> argparse.ArgumentParser:
     e.add_argument("--reason", default=""); e.set_defaults(func=cmd_expire)
     m = sub.add_parser("members"); m.set_defaults(func=cmd_members)
     h = sub.add_parser("heartbeat"); h.add_argument("identity"); h.set_defaults(func=cmd_heartbeat)
-    g = sub.add_parser("registry-migrate"); g.add_argument("--legacy-timeline", action="store_true"); g.set_defaults(func=cmd_registry_migrate)
+    g = sub.add_parser("registry-migrate"); g.add_argument("--legacy-timeline", action="store_true"); g.add_argument("--bind-local-terminals", action="store_true", help="explicitly bind matching same-host legacy panes after a local transport migration"); g.set_defaults(func=cmd_registry_migrate)
     s = sub.add_parser("send"); s.add_argument("sender"); s.add_argument("target"); s.add_argument("subject"); s.add_argument("body"); s.add_argument("--priority", choices=["normal", "high", "urgent"], default="normal"); s.add_argument("--ttl", type=int, default=86400); s.set_defaults(func=cmd_send)
     y = sub.add_parser("retry"); y.add_argument("sender"); y.set_defaults(func=cmd_retry)
     q = sub.add_parser("pull"); q.add_argument("identity"); q.add_argument("--max", type=int, default=10); q.add_argument("--max-bytes", type=int, default=32768); q.set_defaults(func=cmd_pull)

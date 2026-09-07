@@ -51,6 +51,14 @@ unknown. Present means that terminal exists, not that the model is responsive.
 
 Old local registrations without a server binding report unknown until normal
 onboarding binds the real terminal again. No peer identity is silently changed.
+For an operator-authorized Matrix-to-local migration, retain the existing task
+and message databases, stop the network dispatcher, and set `bus.transport` to
+`local`. After checking the original registered panes, run
+`agent-bus --fleet NAME registry-migrate --bind-local-terminals` to bind only
+same-host, active legacy identities whose exact pane and registered location
+still match. Missing panes remain unbound; identities, messages and processing
+states are preserved. Back up the databases first and ensure resident watchers
+load the local configuration before declaring the migration complete.
 Legacy Matrix registrations retain their previous exact terminal checks until
 normal rejoin supplies the stronger binding. Resident watchers refresh a
 derived session name only after their durable database/transport selection

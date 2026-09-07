@@ -1481,6 +1481,54 @@ class AgentBusLocalTransportTest(unittest.TestCase):
             bus.room_members()
         self.assertEqual(bus.DB_PATH.read_bytes(), before)
 
+    def test_explicit_local_migration_binds_only_matching_legacy_panes(self):
+        receiver = self.join("host/receiver-tmux1", mode="pull", harness="codex")
+        missing = self.join("host/missing-tmux2", mode="pull", harness="codex")
+        foreign = self.join("host/foreign-tmux3", mode="pull", harness="codex")
+        self.send(receiver["agent_id"], missing["agent_id"], "preserve pending work")
+        with contextlib.closing(bus.db()) as conn:
+            conn.execute("UPDATE identities SET tmux_server_id=NULL")
+            conn.execute("UPDATE identities SET host=? WHERE agent_id=?",
+                         (bus.local_host(), receiver["agent_id"]))
+            conn.execute("UPDATE identities SET host=?,tmux=? WHERE agent_id=?",
+                         (bus.local_host(), "tmux=0:99.0 win=codex", missing["agent_id"]))
+            conn.execute("UPDATE identities SET host='different-host' WHERE agent_id=?",
+                         (foreign["agent_id"],))
+            conn.commit()
+            before = [tuple(row) for row in conn.execute(
+                "SELECT agent_id,slot,handle,status,created_ms,updated_ms FROM identities ORDER BY agent_id")]
+            message_tables = ("inbox", "outbox", "outbox_recipients", "cursors")
+            messages_before = {name: [tuple(row) for row in conn.execute(f"SELECT * FROM {name}")]
+                               for name in message_tables}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            bus.cmd_registry_migrate(argparse.Namespace(bind_local_terminals=True))
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["bound_local_terminals"], [receiver["agent_id"]])
+        self.assertEqual(result["unmatched_local_terminals"], [missing["agent_id"]])
+        with contextlib.closing(bus.db()) as conn:
+            after = [tuple(row) for row in conn.execute(
+                "SELECT agent_id,slot,handle,status,created_ms,updated_ms FROM identities ORDER BY agent_id")]
+            self.assertEqual(before, after)
+            self.assertEqual(messages_before, {
+                name: [tuple(row) for row in conn.execute(f"SELECT * FROM {name}")]
+                for name in message_tables
+            })
+            self.assertEqual(bus.identity(conn, receiver["agent_id"])["tmux_server_id"], "synthetic-server")
+            self.assertIsNone(bus.identity(conn, missing["agent_id"])["tmux_server_id"])
+            self.assertIsNone(bus.identity(conn, foreign["agent_id"])["tmux_server_id"])
+        repeated = io.StringIO()
+        with contextlib.redirect_stdout(repeated):
+            bus.cmd_registry_migrate(argparse.Namespace(bind_local_terminals=True))
+        self.assertEqual(json.loads(repeated.getvalue())["bound_local_terminals"], [])
+        self.urlopen.assert_not_called()
+
+    def test_local_terminal_binding_rejects_network_transport(self):
+        with mock.patch.dict(os.environ, {"AGENT_BUS_TRANSPORT": "matrix"}):
+            with self.assertRaisesRegex(SystemExit, "requires local transport"):
+                bus.cmd_registry_migrate(argparse.Namespace(bind_local_terminals=True))
+        self.urlopen.assert_not_called()
+
     def test_local_end_to_end_never_uses_http(self):
         sender = self.join("host/sender-tmux1")
         receiver = self.join(
