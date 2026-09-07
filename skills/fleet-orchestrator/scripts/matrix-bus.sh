@@ -8,7 +8,8 @@
 #   setup <handle>             initialize the selected transport
 #   join <handle> <slot> <harness> <watch|pull> <host> <tmux-id>
 #   members                    list active agents
-#   registry-migrate [--legacy-timeline]  one-time local identity publication
+#   registry-migrate [--legacy-timeline | --bind-local-terminals]
+#                             publish legacy identities or bind existing local panes
 #   send <sender-id> <target> <subject> <body> [--priority ...]
 #   pull <agent-id> [--max N] [--max-bytes N]
 #   replay <agent-id> [--max N] [--max-bytes N]   re-show inbox WITHOUT consuming

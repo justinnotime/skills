@@ -87,13 +87,17 @@ def pane_snapshot() -> dict[str, dict[str, str | bool]]:
     ID and server start time bind a registration to that generation; a later
     server cannot inherit an old registration by reusing a pane number.
     """
-    fields = (
-        "#{socket_path}", "#{pid}", "#{start_time}", "#{pane_id}",
-        "#{session_name}:#{window_index}.#{pane_index}", "#{pane_dead}",
-    )
     try:
+        scope = pane_scope()
+        # Grouped viewers can change session_name even for an exact target.
+        # The selected session already defines the location of these panes.
+        session = scope[2][1:] if scope[0] == "-s" else "#{session_name}"
+        fields = (
+            "#{socket_path}", "#{pid}", "#{start_time}", "#{pane_id}",
+            session + ":#{window_index}.#{pane_index}", "#{pane_dead}",
+        )
         result = subprocess.run(
-            [*base_cmd(), "-u", "list-panes", *pane_scope(), "-F", "\t".join(fields)],
+            [*base_cmd(), "-u", "list-panes", *scope, "-F", "\t".join(fields)],
             text=True, capture_output=True, check=False, timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired, TmuxRuntimeConfigError) as exc:

@@ -55,6 +55,7 @@ class TmuxRuntimeTest(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         os.environ.pop("NW_TMUX_SERVER", None)
+        os.environ.pop("NW_FLEET_PRIMARY_SESSION", None)
         os.environ.pop("DISPATCH_LEDGER_ACTOR", None)
         self.addCleanup(self.tmp.cleanup)
 
@@ -85,6 +86,39 @@ class TmuxRuntimeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"NW_TMUX_SERVER": "staging"}):
             self.assertEqual(tmux_runtime.configured_server(), ("staging", "env"))
             self.assertEqual(tmux_runtime.base_cmd(), ["tmux", "-L", "staging"])
+
+    def test_pane_snapshot_uses_selected_session_despite_grouped_viewers(self):
+        def observe(command, **kwargs):
+            scope = command[command.index("list-panes") + 1:command.index("-F")]
+            self.assertEqual(scope, ["-s", "-t", "=alpha"])
+            # tmux can report a grouped viewer as session_name even when the
+            # target is the primary session. Honor the requested format here.
+            values = {
+                "socket_path": "/tmp/test-tmux/socket", "pid": "123",
+                "start_time": "456", "pane_id": "%7", "session_name": "tview-test",
+                "window_index": "2", "pane_index": "0", "pane_dead": "0",
+            }
+            output = command[-1]
+            for name, value in values.items():
+                output = output.replace("#{" + name + "}", value)
+            return subprocess.CompletedProcess(command, 0, output + "\n", "")
+
+        with mock.patch.dict(os.environ, {"NW_FLEET_PRIMARY_SESSION": "alpha"}):
+            with mock.patch.object(tmux_runtime.subprocess, "run", side_effect=observe):
+                pane = tmux_runtime.pane_snapshot()["%7"]
+        self.assertEqual(pane["location"], "alpha:2.0")
+        self.assertFalse(pane["dead"])
+        self.assertTrue(pane["server_id"].startswith("tmux:"))
+
+    def test_unscoped_pane_snapshot_preserves_reported_session(self):
+        output = "/tmp/test-tmux/socket\t123\t456\t%7\tbeta:2.0\t0\n"
+        with mock.patch.object(tmux_runtime.subprocess, "run", return_value=
+                               subprocess.CompletedProcess([], 0, output, "")) as run:
+            pane = tmux_runtime.pane_snapshot()["%7"]
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("list-panes") + 1:command.index("-F")], ["-a"])
+        self.assertIn("#{session_name}", command[-1])
+        self.assertEqual(pane["location"], "beta:2.0")
 
     def test_invalid_selector_fails_closed(self):
         path = self.write_config("tmux37 -- bad")
