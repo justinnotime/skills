@@ -77,6 +77,42 @@ compatibility interface required by the affected package's contract; otherwise
 delete obsolete forwards after updating callers, instead of maintaining another
 permanent dispatch layer.
 
+## Apply only the selected machine's installation
+
+Start with the machine's existing responsibilities. An interactive consumer or
+backup source need not become an archive publisher when it installs packages.
+Absent schedules, hooks and credentials can be intentional. Preserve that
+selection unless the operator requests a new capability; a copied service
+template or a successful link installation is not activation authority.
+
+A remote repository rename does not rename its local checkout. If the checkout
+location changes, inspect active callers and linked worktrees before moving it,
+repair Git worktree metadata, and update the remote URL separately. Check command
+symlinks, shell launchers, repository-manager registries and existing scheduler
+arguments. Preserve data destinations and package-required compatibility entries;
+do not rename backup data merely because executable source moved. Install lasting
+links from the canonical source, not the temporary editing worktree. Recheck the
+inspected revision if another synchronizer updates that source during migration.
+
+Audit the scheduler native to the host: cron and user services on Linux, and
+cron plus user/system launchd definitions and loaded jobs on macOS. Inspect
+effective Git hook directories, user and project harness settings, enabled plugin
+hooks and launcher-selected alternate configuration roots. A downloaded plugin
+catalog is not proof that its hooks are enabled. Classify old-command removal
+patterns, session history and saved command approvals separately from executable
+callers. Record unreadable locations and search exclusions in private evidence.
+
+Report link resolution, command readiness and active execution separately.
+Discovery links do not install runtime dependencies. Provision the selected
+package's declared dependencies in a persistent environment and select its
+documented interpreter in the actual caller. A temporary test environment does
+not make the default installed command ready. A
+configuration-only doctor can succeed without credentials, while an absent hook
+has nothing to reload. Validate an existing enabled entry through an invocation
+after the switch; an earlier log or zero exit from a skipped task does not prove
+the new entry ran. Keep machine inventories and results private, as described in
+the activation procedure below.
+
 ## Prefer a directly consumed private configuration
 
 Before retaining a configuration generator, check whether the public loader can
@@ -123,8 +159,11 @@ package discovery link and a JSON configuration link:
 ```
 
 Replace the example paths with explicit private locations. Installation paths
-must be absolute after `~` expansion; this installer does not expand arbitrary
-environment variables in those fields. Sources must already exist. Preview with
+must be absolute after native resolution. The installer supports `~`, explicit
+`${NAME}` references, `${CONFIG_DIR}` resolved through the selected configuration
+link, and structured environment/default selections; it does not evaluate shell
+expressions. Use the [native configuration reference](../skills/runtime-install/references/configuration.md#native-environment-values-and-structured-jobs)
+for the exact syntax, required variables and defaults. Sources must already exist. Preview with
 the installed package's entry:
 
 ```sh
