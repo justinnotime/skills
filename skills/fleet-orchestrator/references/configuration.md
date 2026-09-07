@@ -83,6 +83,11 @@ For a handoff publisher, ORC supplies `ORC_HANDOFF_SRC`, `ORC_HANDOFF_DST`
 `ORC_HANDOFF_AGENT`. The command must finish successfully before ORC retires the
 identity. Without it, ORC writes an atomic local handoff. An external publisher
 is only needed when the caller requires publication beyond local storage.
+Automatic local fleets store handoffs under their own runtime's
+`state/fleet-orchestrator/handoffs`; they do not inherit `handoff.directory` or
+`handoff.publish_command` from the default configuration. Topology and onboarding
+read that same fleet-local directory. The default fleet and explicitly configured
+legacy fleets retain their configured handoff directory and publisher.
 
 A runtime configuration can name privileged commands and real identities.
 Keep it private and owner-writable, review changes, and do not import an

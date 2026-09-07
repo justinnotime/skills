@@ -6941,6 +6941,29 @@ class DoneGuardCoverageTests(StoreTestCase):
     def state_of(self, did):
         return {r["id"]: r for r in self.task_ids()}[did]["state"]
 
+    def test_dry_tick_with_pr_guards_does_not_change_saved_state(self):
+        did = self.open_pr()
+        for field, state in (("ready_cmd", "authoring"),
+                             ("done_cmd", "awaiting-review"),
+                             ("check_cmd", "fixing")):
+            for command in ("false", "exit 2", "printf new-head"):
+                with self.subTest(field=field, command=command):
+                    conn = wp.connect_writable()
+                    with conn:
+                        conn.execute(
+                            "UPDATE dispatch SET state=?,done_cmd='',ready_cmd='',"
+                            "check_cmd='',progress_hash='old-head',"
+                            "guard_unknown_streak=4 WHERE id=?", (state, did))
+                        conn.execute(f"UPDATE dispatch SET {field}=? WHERE id=?",
+                                     (command, did))
+                    before = list(conn.iterdump())
+                    conn.close()
+                    output = self.run_cli(ORC, "tick", "--dry-run")
+                    self.assertIn("OK dry tick done", output)
+                    conn = wp.connect_readonly()
+                    self.assertEqual(list(conn.iterdump()), before)
+                    conn.close()
+
     def test_merged_is_legal_from_every_open_pr_state(self):
         for state in wp.PR_STATES:
             if state == "closed":

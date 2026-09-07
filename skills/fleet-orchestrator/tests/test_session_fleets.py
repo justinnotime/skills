@@ -79,6 +79,92 @@ class SessionFleetTest(unittest.TestCase):
                           env={**self.env, "TMUX_PANE": pane})
         return json.loads(result.stdout)["agent_id"]
 
+    def configure_handoffs(self):
+        directory = self.root / "configured-handoffs"
+        directory.mkdir()
+        (directory / "2020-01-01-shared-worker.md").write_text("Default fleet history.\n")
+        marker = self.root / "publisher-invocations"
+        publisher = self.root / "publish-handoff.py"
+        publisher.write_text(
+            "import os, pathlib, shutil\n"
+            "directory = pathlib.Path(os.environ['ORC_HANDOFF_DIRECTORY'])\n"
+            "directory.mkdir(parents=True, exist_ok=True)\n"
+            "shutil.copyfile(os.environ['ORC_HANDOFF_SRC'], "
+            "directory / os.environ['ORC_HANDOFF_DST'])\n"
+            f"with pathlib.Path({str(marker)!r}).open('a') as output:\n"
+            "    output.write(os.environ['ORC_HANDOFF_DST'] + '\\n')\n")
+        config = json.loads(self.config.read_text())
+        config["handoff"] = {"directory": str(directory),
+                             "publish_command": [sys.executable, str(publisher)]}
+        self.config.write_text(json.dumps(config))
+        return directory, marker
+
+    def test_native_fleets_isolate_handoff_reads_writes_and_same_named_agents(self):
+        configured, published = self.configure_handoffs()
+        notes = {}
+        for name in ("alpha", "beta"):
+            self.native_session(name)
+            identity = self.join(name, "shared-worker")
+            self.run_command([ORC, "--fleet", name, "open", "--to", "operator",
+                              "--subject", "Synthetic handoff test", "--body",
+                              "Initialize this isolated test ledger.", "--no-check"])
+            view = self.view(name)
+            topology = self.run_command([ORC, "--fleet", name, "topology"]).stdout
+            onboard = self.run_command([ORC, "--fleet", name, "onboard", identity]).stdout
+            self.assertNotIn("2020-01-01-shared-worker.md", topology + onboard)
+            self.run_command([ORC, "--fleet", name, "checkout", identity,
+                              "--summary", f"Work from {name} only."])
+            directory = Path(view["dispatch_ledger_db"]).parent / "handoffs"
+            files = list(directory.glob("*.md"))
+            self.assertEqual(len(files), 1)
+            notes[name] = files[0]
+            onboard = self.run_command([ORC, "--fleet", name, "onboard", "shared-worker"]).stdout
+            self.assertIn(str(files[0]), onboard)
+            self.assertNotIn(str(configured), onboard)
+            with sqlite3.connect(view["agent_bus_db"]) as db:
+                self.assertEqual(db.execute("SELECT status FROM identities WHERE agent_id=?",
+                                            (identity,)).fetchone()[0], "retired")
+        self.assertEqual(notes["alpha"].name, notes["beta"].name)
+        self.assertNotEqual(notes["alpha"].parent, notes["beta"].parent)
+        self.assertIn("Work from alpha only.", notes["alpha"].read_text())
+        self.assertIn("Work from beta only.", notes["beta"].read_text())
+        self.assertEqual(list(configured.iterdir()), [configured / "2020-01-01-shared-worker.md"])
+        self.assertFalse(published.exists())
+
+    def test_default_fleet_retains_configured_handoff_publication(self):
+        configured, published = self.configure_handoffs()
+        self.native_session("0")
+        env = self.session_environment("0")
+        result = self.bus("default", "join", "default-worker", "default-worker", "test", "pull",
+                          socket.gethostname().split('.')[0], "tmux=0:0.0 win=test", env=env)
+        identity = json.loads(result.stdout)["agent_id"]
+        self.run_command([ORC, "--fleet", "default", "checkout", identity,
+                          "--summary", "Default archive publication."])
+        names = published.read_text().splitlines()
+        self.assertEqual(len(names), 1)
+        self.assertIn("Default archive publication.", (configured / names[0]).read_text())
+        self.assertIn("2020-01-01-shared-worker.md",
+                      self.run_command([ORC, "--fleet", "default", "topology"]).stdout)
+
+    def test_explicit_legacy_fleet_retains_configured_handoff_publication(self):
+        configured, published = self.configure_handoffs()
+        legacy_server = self.server + "-legacy"
+        self.addCleanup(lambda: self.run_command(
+            ["tmux", "-u", "-L", legacy_server, "kill-server"], check=False))
+        self.run_command([ORC, "fleet", "create", "legacy", "--tmux-server", legacy_server,
+                          "--primary-session", "work"])
+        pane = self.run_command(["tmux", "-u", "-L", legacy_server, "display-message", "-p",
+                                 "-t", "=work:0.0", "#{pane_id}"]).stdout.strip()
+        result = self.bus("legacy", "join", "legacy-worker", "legacy-worker", "test", "pull",
+                          socket.gethostname().split('.')[0], "tmux=work:0.0 win=test",
+                          env={**self.env, "TMUX_PANE": pane})
+        identity = json.loads(result.stdout)["agent_id"]
+        self.run_command([ORC, "--fleet", "legacy", "checkout", identity,
+                          "--summary", "Explicit legacy archive publication."])
+        names = published.read_text().splitlines()
+        self.assertEqual(len(names), 1)
+        self.assertIn("Explicit legacy archive publication.", (configured / names[0]).read_text())
+
     def test_native_sessions_are_fleets_without_profiles_and_keep_buses_separate(self):
         self.native_session("alpha")
         self.native_session("beta")

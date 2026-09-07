@@ -1067,8 +1067,16 @@ def _owed_by_seat(conn, names: set, agent_id: str) -> list[tuple]:
     return out
 
 
+def _automatic_local_fleet() -> bool:
+    return (os.environ.get("AGENT_BUS_TRANSPORT") == "local"
+            and bool(os.environ.get("NW_FLEET_PROFILE_APPLIED"))
+            and bool(os.environ.get("NW_FLEET_PRIMARY_SESSION"))
+            and not os.environ.get("NW_FLEET_PROFILE_PATH"))
+
+
 def _handoff_dir() -> Path:
-    return cfg.path("handoff.directory", nw_paths.orchestrator_state_dir() / "handoffs")
+    local = nw_paths.orchestrator_state_dir() / "handoffs"
+    return local if _automatic_local_fleet() else cfg.path("handoff.directory", local)
 
 
 def cmd_topology(args: argparse.Namespace) -> int:
@@ -1264,7 +1272,7 @@ def cmd_checkout(args: argparse.Namespace) -> int:
             src = fh.name
         subject = f"handoff: {handle} checkout {when.strftime('%Y-%m-%d')}"
         actor = f"orc checkout ({wp.whoami()})"
-        publisher = cfg.command("handoff.publish_command")
+        publisher = [] if _automatic_local_fleet() else cfg.command("handoff.publish_command")
         env = dict(os.environ, ORC_HANDOFF_SRC=src, ORC_HANDOFF_DST=dst_rel,
                    ORC_HANDOFF_DIRECTORY=str(_handoff_dir()),
                    ORC_HANDOFF_SUBJECT=subject, ORC_HANDOFF_AGENT=actor)
@@ -2259,14 +2267,16 @@ def tick_pr_guards(conn, dry: bool, *, pool_registry_fresh: bool = True) -> None
 
 
             verdict, first = wp.run_guard(row["done_cmd"])
-            guard_streak(conn, row, verdict)
+            if not dry:
+                guard_streak(conn, row, verdict)
             if verdict == wp.GUARD_TRUE:
                 fire_mechanical(conn, row, "merged",
                                 f"done guard (a human merged): {first}", dry)
                 continue
         if row["state"] == "authoring" and row["ready_cmd"]:
             verdict, first = wp.run_guard(row["ready_cmd"])
-            guard_streak(conn, row, verdict)
+            if not dry:
+                guard_streak(conn, row, verdict)
             if verdict == wp.GUARD_TRUE:
                 reviewer = row["reviewer_seat"] or ""
                 pool_managed = bool(row["reviewer_pool"]) or (
@@ -2303,7 +2313,8 @@ def tick_pr_guards(conn, dry: bool, *, pool_registry_fresh: bool = True) -> None
                              row["responsibility_version"])
         elif row["state"] in ("fixing", "merge-pending") and row["check_cmd"]:
             verdict, new_hash = wp.run_progress(row["check_cmd"])
-            guard_streak(conn, row, verdict)
+            if not dry:
+                guard_streak(conn, row, verdict)
             if verdict == wp.GUARD_TRUE:
                 moved = bool(row["progress_hash"]) and new_hash != row["progress_hash"]
                 reviewer = row["reviewer_seat"] or ""
@@ -3320,10 +3331,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
         route_observation_id=route_observation_id)
     tick_pr_guards(conn, dry, pool_registry_fresh=(dry or registry_fresh))
     tick_review_reconcile(conn, dry)
-    local_session = (os.environ.get("AGENT_BUS_TRANSPORT") == "local"
-                     and bool(os.environ.get("NW_FLEET_PROFILE_APPLIED"))
-                     and bool(os.environ.get("NW_FLEET_PRIMARY_SESSION"))
-                     and not os.environ.get("NW_FLEET_PROFILE_PATH"))
+    local_session = _automatic_local_fleet()
     if not local_session:
         tick_checkout_hygiene(conn, dry)
     if dry or registry_fresh:
