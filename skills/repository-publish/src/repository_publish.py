@@ -332,6 +332,60 @@ def reset_worktree(root: Path, task_branch: str, upstream: str):
     git(root, "reset", "--hard", "--quiet", upstream)
 
 
+def commit_worktree(root: Path, args) -> int:
+    """Commit selected generated files without publishing or discarding output."""
+    if not (root / ".git").is_file():
+        raise Failure("commit requires a linked worktree")
+    if not args.source_repository:
+        raise Failure("--source-repository is required for commit")
+    source = absolute(args.source_repository)
+    if source == root or not (source / ".git").exists():
+        raise Failure("source repository must be a separate Git checkout")
+    if absolute(root / text(root, "rev-parse", "--git-common-dir")) != absolute(
+        source / text(source, "rev-parse", "--git-common-dir")
+    ):
+        raise Failure("dedicated worktree belongs to another repository")
+    if (
+        args.task_branch == args.branch
+        or text(root, "branch", "--show-current") != args.task_branch
+    ):
+        raise Failure("refusing to commit an unexpected branch")
+    selected = paths(args.paths or "")
+    changes = changed(root)
+    if any(not owned(name, selected) for _, name in changes):
+        raise Failure("dedicated worktree includes a path outside its ownership")
+    if not changes:
+        return 2
+    validation, message = command(args.validate_command), command(args.message_command)
+    if not validation or not message:
+        raise Failure("commit requires validation and message commands")
+    # Exact observed paths include deletions and both rename sides. Never use a
+    # broad add or reset: a failed policy/commit leaves the paid output in place.
+    git(root, "--literal-pathspecs", "add", "--", *dict.fromkeys(name for _, name in changes))
+    env = dict(
+        os.environ,
+        REPOSITORY_PUBLISH_WORKTREE=str(root),
+        REPOSITORY_PUBLISH_REPOSITORY=str(source),
+    )
+    checked_policy(validation, root, env)
+    result = checked_policy(message, root, env, capture=True)
+    if not result.strip():
+        raise Failure("message command returned an empty commit message")
+    # Policy is caller-controlled, but cannot widen the selected publication.
+    if any(not owned(name, selected) for _, name in changed(root)):
+        raise Failure("policy added a path outside its ownership")
+    proc = subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-F", "-"],
+        input=result.encode(),
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    if proc.returncode:
+        raise Failure("commit failed; generated output was retained")
+    return 0
+
+
 def run_at_ref(root: Path, reference: str, scratch: Path, argv: list[str]) -> int:
     if not argv:
         raise Failure("a command after -- is required")
@@ -359,11 +413,24 @@ def worktree_main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description="Prepare, inspect or reset caller-owned Git worktrees")
     p.add_argument(
         "action",
-        choices=["prepare", "fetch", "changed", "committed", "ahead", "reset", "run-at-ref"],
+        choices=[
+            "prepare",
+            "fetch",
+            "changed",
+            "committed",
+            "ahead",
+            "reset",
+            "commit",
+            "run-at-ref",
+        ],
     )
     p.add_argument("--repo", default=".")
     p.add_argument("--worktree")
     p.add_argument("--task-branch")
+    p.add_argument("--source-repository")
+    p.add_argument("--paths")
+    p.add_argument("--validate-command")
+    p.add_argument("--message-command")
     p.add_argument("--remote", default="origin")
     p.add_argument("--branch", default="main")
     p.add_argument("--ref", default="HEAD")
@@ -389,7 +456,7 @@ def worktree_main(argv: list[str]) -> int:
             raise Failure("remote and branch cannot be options")
         git(root, "check-ref-format", "refs/heads/" + args.branch)
         upstream = f"refs/remotes/{args.remote}/{args.branch}"
-        if args.action in {"prepare", "reset"} and not args.task_branch:
+        if args.action in {"prepare", "reset", "commit"} and not args.task_branch:
             raise Failure("--task-branch is required")
         if args.task_branch and args.task_branch.startswith("-"):
             raise Failure("task branch cannot be an option")
@@ -405,6 +472,8 @@ def worktree_main(argv: list[str]) -> int:
             fetch(root, args.remote, args.branch)
         elif args.action == "reset":
             reset_worktree(root, args.task_branch, upstream)
+        elif args.action == "commit":
+            return commit_worktree(root, args)
         elif args.action == "ahead":
             print(text(root, "rev-list", "--count", upstream + "..HEAD"))
         elif args.action == "run-at-ref":

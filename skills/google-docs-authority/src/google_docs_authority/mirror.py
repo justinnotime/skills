@@ -16,7 +16,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from http.client import IncompleteRead
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlparse
@@ -26,11 +27,21 @@ import yaml
 
 from google_docs_authority import config
 from google_docs_authority.fingerprint import fingerprint
+from google_docs_authority.mirror_status import (
+    TrashedDocument,
+    failure_details,
+    http_body,
+    load_status,
+    read_get,
+    record_result,
+    retryable,
+)
 
 # Configuration is loaded before any filesystem or network operation. Imports
 # remain inert, including when callers inspect the pure rendering functions.
 OUT_REPO = OUTPUT_DIR = STATE_FILE = CACHE_LINK = DEFAULT_CACHE_TARGET = None
 SOURCES_YAML = DISCOVERED_YAML = TOKEN_FILE = None
+STATUS_FILE = None
 CACHE_LINK_CONFIGURED = False
 MASK_ENABLED = True
 MASK_TIERS = {"hard", "ctx"}
@@ -57,6 +68,7 @@ def configure(settings, state_override=None, config_path=None):
     global MASK_ENABLED, MASK_TIERS, REDACT_COMMAND, ALLOW_UNAUTHENTICATED
     global IMAGE_SHRINK_FLOOR, ALLOW_IMAGE_SHRINK, ALLOW_NO_PIL
     global PANDOC_MEM_MAX, PANDOC_TIMEOUT_S, PANDOC_COMMAND, README_HEADER
+    global STATUS_FILE
     section = settings["mirror"]
     OUT_REPO = section["repository_root"]
     OUTPUT_DIR = section["output_directory"]
@@ -77,6 +89,9 @@ def configure(settings, state_override=None, config_path=None):
         settings.get("write_token_file"),
     }:
         raise ValueError("mirror-state-path-conflict")
+    STATUS_FILE = section.get("status_file")
+    if STATUS_FILE == STATE_FILE:
+        raise ValueError("mirror-status-path-conflict")
     DEFAULT_CACHE_TARGET = section["cache_directory"]
     CACHE_LINK_CONFIGURED = bool(section.get("cache_link"))
     CACHE_LINK = section.get("cache_link") or DEFAULT_CACHE_TARGET
@@ -149,6 +164,10 @@ def open_request(request, **kwargs):
     return request_opener(request, **kwargs)
 
 
+def read_request(request, *, timeout):
+    return read_get(request, opener=open_request, timeout=timeout)
+
+
 def checked_component(value):
     if (
         not isinstance(value, str)
@@ -205,11 +224,12 @@ def drive_meta(doc_id: str, fields: str) -> dict | None:
     token = get_access_token()
     if not token:
         return None
-    url = f"{DRIVE_API}{doc_id}?fields={fields}"
-    with open_request(
-        Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=60
-    ) as response:
-        data = json.loads(response.read())
+    url = f"{DRIVE_API}{doc_id}?fields={fields}&supportsAllDrives=true"
+    data = json.loads(
+        read_request(
+            Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=60
+        )
+    )
     if not isinstance(data, dict):
         raise ValueError("mirror-drive-metadata-invalid")
     return data
@@ -261,23 +281,35 @@ def fetch_export_authenticated(doc_id: str, mime: str) -> bytes | None:
         return None
     url = f"{DRIVE_API}{doc_id}/export?mimeType={quote(mime, safe='')}"
     try:
-        with open_request(
+        return read_request(
             Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=180
-        ) as response:
-            return response.read()
+        )
     except HTTPError as error:
-        body = error.read(4096)
+        body = http_body(error)
         if error.code == 403 and b"exportSizeLimitExceeded" in body:
             metadata = drive_meta(doc_id, "exportLinks")
             link = ((metadata or {}).get("exportLinks") or {}).get(mime)
             if not link:
                 return None
-            with open_google_asset_get(
-                link,
-                headers={"Authorization": f"Bearer {token}", "User-Agent": BROWSER_UA},
+
+            def asset_opener(request, *, timeout):
+                return open_google_asset_get(
+                    request.full_url,
+                    headers=dict(request.header_items()),
+                    timeout=timeout,
+                )
+
+            return read_get(
+                Request(
+                    link,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "User-Agent": BROWSER_UA,
+                    },
+                ),
+                opener=asset_opener,
                 timeout=300,
-            ) as response:
-                return response.read()
+            )
         if error.code == 400 and mime == "text/markdown":
             return None
         raise
@@ -359,8 +391,7 @@ def fetch_html(doc_id: str, slug: str | None = None, from_cache: bool = False) -
             raise ValueError("mirror-html-export-unavailable")
         url = EXPORT_URL.format(doc_id=doc_id)
         req = Request(url, headers={"User-Agent": BROWSER_UA})
-        with open_request(req, timeout=180) as resp:
-            html = resp.read()
+        html = read_request(req, timeout=180)
     if not is_valid_doc_html(html):
         raise ValueError("mirror-html-export-invalid")
     if cache_path is not None:
@@ -671,10 +702,11 @@ def fetch_tab_tree(doc_id: str) -> tuple[str | None, list[dict]] | None:
         mask = f"{props},childTabs({mask})"
     url = f"{DOCS_API}{doc_id}?includeTabsContent=true&fields=title,tabs({mask})"
     try:
-        with open_request(
-            Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=120
-        ) as resp:
-            data = json.loads(resp.read())
+        data = json.loads(
+            read_request(
+                Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=120
+            )
+        )
     except (OSError, ValueError):
         raise ValueError("mirror-tab-tree-fetch-failed") from None
 
@@ -1077,10 +1109,11 @@ def fetch_inline_object_uris(doc_id: str) -> list[str] | None:
         mask = f"{props},childTabs({mask})"
     url = f"{DOCS_API}{doc_id}?includeTabsContent=true&fields=tabs({mask})"
     try:
-        with open_request(
-            Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=180
-        ) as resp:
-            data = json.loads(resp.read())
+        data = json.loads(
+            read_request(
+                Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=180
+            )
+        )
     except (OSError, ValueError):
         raise ValueError("mirror-image-metadata-fetch-failed") from None
     uris: list[str] = []
@@ -1165,17 +1198,25 @@ def upgrade_images_to_originals(
                 if token
                 else []
             )
+        last_error = None
         for headers in headers_options:
             try:
-                with open_request(Request(uri, headers=headers), timeout=120) as resp:
-                    data = resp.read()
+                data = read_request(Request(uri, headers=headers), timeout=120)
                 break
-            except Exception:
+            except Exception as error:
+                last_error = error
+                # Only a rejected anonymous request benefits from credentials.
+                if (
+                    not isinstance(error, HTTPError)
+                    or error.code not in {401, 403}
+                    or retryable(error)
+                ):
+                    break
                 continue
         if not data:
             if isinstance(uri, Path):
                 continue
-            raise ValueError("mirror-original-image-fetch-failed")
+            raise ValueError("mirror-original-image-fetch-failed") from last_error
         sha1 = hashlib.sha1(data).hexdigest()
         if sha1 in seen_orig:
             continue
@@ -1519,8 +1560,16 @@ def sync_doc(
     drive_name = None
     if not from_cache:
         try:
-            meta = drive_meta(doc_id, "version,name")
-        except (HTTPError, URLError, TimeoutError) as error:
+            meta = drive_meta(doc_id, "version,name,trashed")
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            ConnectionError,
+            IncompleteRead,
+        ) as error:
+            if not retryable(error):
+                raise
             meta = None
             diagnostic = (
                 f"http-{error.code}"
@@ -1530,10 +1579,12 @@ def sync_doc(
                 else "network"
             )
             print(
-                f"  WARN version preflight failed ({diagnostic}); attempting full export",
+                f"WARN document={doc_id} version preflight failed ({diagnostic}); attempting full export",
                 file=sys.stderr,
             )
         if meta:
+            if meta.get("trashed") is True:
+                raise TrashedDocument("mirror-document-trashed")
             drive_ver = meta.get("version")
             drive_name = meta.get("name")
         name_current = drive_name is None or doc_dirname(drive_name, doc_id) == cur_dir
@@ -1575,11 +1626,7 @@ def sync_doc(
             return md_result
         print("  NOTE markdown engine unavailable for this doc; using the HTML engine")
     slug = docdirs.get(doc_id, slug)
-    try:
-        html = fetch_html(doc_id, slug=slug, from_cache=from_cache)
-    except (HTTPError, URLError, TimeoutError):
-        print("  FAIL document fetch failed", file=sys.stderr)
-        return "error"
+    html = fetch_html(doc_id, slug=slug, from_cache=from_cache)
     if from_cache:
         print(f"  using cached HTML at {html_cache_path(slug)}")
     html_sha1 = hashlib.sha1(html).hexdigest()
@@ -1711,6 +1758,19 @@ def crawl_for_new_docs(state: dict) -> list[dict]:
     _, manual, discovered = load_all_sources()
     known_ids = {d["id"] for d in manual} | {d["id"] for d in discovered}
     inaccessible = state.setdefault("_inaccessible", {})
+    now = datetime.now(timezone.utc)
+
+    def cooling_down(doc_id):
+        previous = inaccessible.get(doc_id, {})
+        try:
+            checked = datetime.fromisoformat(previous["checked_at"])
+            if checked.tzinfo is None:
+                checked = checked.replace(tzinfo=timezone.utc)
+            # Recheck legacy, stale or implausibly future-dated entries.
+            return timedelta(0) <= now - checked < timedelta(hours=24)
+        except (KeyError, ValueError, TypeError):
+            return False
+
     taken_slugs = {d["slug"] for d in manual} | {d["slug"] for d in discovered}
     candidates: dict[str, str] = {}
     for readme in sorted(OUTPUT_DIR.rglob("*.md")):
@@ -1719,7 +1779,7 @@ def crawl_for_new_docs(state: dict) -> list[dict]:
             readme.read_text(encoding="utf-8", errors="replace")
         ):
             cid = m.group(1)
-            if cid in known_ids or cid in inaccessible or cid in candidates:
+            if cid in known_ids or cid in candidates or cooling_down(cid):
                 continue
             candidates[cid] = parent_slug
     if not candidates:
@@ -1731,20 +1791,27 @@ def crawl_for_new_docs(state: dict) -> list[dict]:
         print(f"  probing {cid} (linked from {parent_slug})…")
         try:
             html = fetch_html(cid)
-        except HTTPError as error:
-            if error.code not in {401, 403, 404}:
+        except Exception as error:
+            details = failure_details(error)
+            print(
+                f"WARN document={cid} stage=crawl category={details['category']} "
+                f"http_status={details['http_status']}",
+                file=sys.stderr,
+            )
+            if details["category"] != "inaccessible":
                 raise
-            inaccessible[cid] = {"checked_at": today, "reason": "fetch failed"}
+            inaccessible[cid] = {"checked_at": now.isoformat(), **details}
             print("    inaccessible (fetch error)")
             continue
         if not is_valid_doc_html(html):
             inaccessible[cid] = {
-                "checked_at": today,
+                "checked_at": now.isoformat(),
                 "reason": "no doc title element (likely login/error page)",
             }
             print("    inaccessible (login or error page)")
             continue
         title = extract_doc_title(html)
+        inaccessible.pop(cid, None)
         slug = derive_slug(title, cid, taken_slugs)
         entry = {
             "id": cid,
@@ -1878,6 +1945,11 @@ def main(argv=None) -> int:
         help="List selected document IDs without writing or contacting Google",
     )
     parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Read configured private document inspection status without Google requests",
+    )
+    parser.add_argument(
         "--setup-cache",
         action="store_true",
         help="Create the explicitly configured legacy cache link only",
@@ -1886,6 +1958,17 @@ def main(argv=None) -> int:
     if args.self_test:
         return selftest()
     try:
+        if args.status and any(
+            (
+                args.setup_cache,
+                args.doctor,
+                args.dry_run,
+                args.crawl,
+                args.force,
+                args.from_cache,
+            )
+        ):
+            raise ValueError("mirror-status-arguments-conflict")
         settings = config.load(args.config, root_override=args.root)
         if "mirror" not in settings:
             raise ValueError("mirror-config-required")
@@ -1909,7 +1992,12 @@ def main(argv=None) -> int:
         if args.crawl and DISCOVERED_YAML is None:
             raise ValueError("mirror-crawl-discovery-list-required")
         docs = validate_sources()
-        state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+        status = load_status(STATUS_FILE)
+        state = (
+            json.loads(STATE_FILE.read_text())
+            if not args.status and STATE_FILE.exists()
+            else {}
+        )
         if not isinstance(state, dict):
             raise ValueError("mirror-state-invalid")
         docdirs = {}
@@ -1925,6 +2013,23 @@ def main(argv=None) -> int:
         ]
         if args.only and not selected:
             raise ValueError("mirror-selected-document-not-found")
+        if args.status:
+            if STATUS_FILE is None:
+                raise ValueError("mirror-status-file-required")
+            print(
+                json.dumps(
+                    {
+                        "schema": status["schema"],
+                        "documents": {
+                            doc["id"]: status["documents"].get(doc["id"])
+                            for doc in selected
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.dry_run:
             print(
                 json.dumps(
@@ -1944,6 +2049,7 @@ def main(argv=None) -> int:
         while True:
             rounds += 1
             for doc in selected:
+                failure = None
                 try:
                     result = sync_doc(
                         doc,
@@ -1954,11 +2060,35 @@ def main(argv=None) -> int:
                         or settings["mirror"].get("engine", "markdown"),
                         docdirs=docdirs,
                     )
-                except Exception:
-                    print(
-                        "FAIL selected document could not be mirrored", file=sys.stderr
-                    )
+                except Exception as error:
+                    failure = failure_details(error)
                     result = "error"
+                if result == "error":
+                    failure = failure or {
+                        "category": "render-refused",
+                        "http_status": None,
+                    }
+                previous_failures = (
+                    status["documents"]
+                    .get(doc["id"], {})
+                    .get("consecutive_failures", 0)
+                )
+                record = (
+                    None
+                    if args.from_cache
+                    else record_result(STATUS_FILE, status, doc["id"], failure)
+                )
+                if failure:
+                    print(
+                        f"FAIL document={doc['id']} category={failure['category']} "
+                        f"http_status={failure['http_status']} "
+                        f"consecutive_failures={record['consecutive_failures'] if record else 'unrecorded'}",
+                        file=sys.stderr,
+                    )
+                elif previous_failures and record:
+                    print(
+                        f"OK document={doc['id']} recovered after {previous_failures} failed inspection(s)"
+                    )
                 counts[result] = counts.get(result, 0) + 1
             if counts.get("error"):
                 print("FAIL synchronization state was not advanced", file=sys.stderr)

@@ -19,6 +19,7 @@ synthetic example is independent of any private repository:
     "source_list": "settings/documents.yaml",
     "discovered_list": "settings/discovered.yaml",
     "state_file": "~/private/google/progress.json",
+    "status_file": "~/private/google/inspection-status.json",
     "cache_directory": "~/.cache/google-documents",
     "engine": "markdown",
     "redact_enabled": true,
@@ -51,6 +52,7 @@ cannot override an enabled private policy.
 ```bash
 scripts/sync --config /private/documents.json --doctor
 scripts/sync --config /private/documents.json --dry-run
+scripts/sync --config /private/documents.json --status
 scripts/sync --config /private/documents.json --root /private/task-worktree \
   --state-file /private/staged-progress.json
 scripts/sync --config /private/documents.json --only example-document
@@ -58,11 +60,17 @@ scripts/sync --config /private/documents.json --from-cache --force
 ```
 
 Native Markdown is preferred, with HTML conversion for unsupported native
-exports. A failed HTTP request or timeout during the initial Drive version/name
-preflight falls back to a full export; this optimization is not required for
-mirroring. Authentication/configuration failures and metadata needed to complete
-an export remain errors. The fallback still validates the document and saves
-progress only when the run succeeds.
+exports. GET requests retry temporary network/read failures, HTTP 429 and 5xx,
+and the documented 403 `rateLimitExceeded` / `userRateLimitExceeded` reasons.
+Each request makes at most three attempts, with one- and two-second waits.
+Authentication failures, other 403 errors and 404 responses are not retried.
+OAuth exchanges and publication writes have no automatic retry.
+
+When these attempts exhaust a temporary failure during the initial Drive
+version/name preflight, the mirror still attempts a full export; that preflight
+is an optimization. Authentication/configuration failures, inaccessible sources
+and metadata needed to complete an export remain errors. The fallback still
+validates the document and saves progress only when the run succeeds.
 
 Large-document export links may redirect between allowed Google HTTPS asset
 hosts. Every destination is validated, and a host change removes authorization
@@ -84,17 +92,49 @@ Cache downloads can remain for retry. A wrapper must propagate this exit status
 before registry updates, commits or durable progress promotion. Inaccessible
 selected documents are not silently removed from configuration or archive.
 
+Optional `mirror.status_file` keeps private inspection results independently of
+that success-only checkpoint. Place it outside the repository and the
+publisher's disposable transaction directory, distinct from credentials,
+configuration and `state_file`. Keep the caller's existing single-writer lock.
+Each completed live document inspection updates its record atomically, including
+failed runs. `--status` reads this JSON without network requests or writes;
+`--only` restricts the result to one selected document. A null record means the
+document has not been inspected with status recording enabled.
+
+Records include `consecutive_failures`, `first_failure_at`, `last_failure_at`,
+`last_success_at`, a fixed error `category`, numeric `http_status` where known,
+and `access_state`. A failed invocation counts once per document, regardless of
+request retries. Recovery clears the failure streak and first-failure timestamp,
+retains the last-failure timestamp, and reports recovery in the log. Offline
+rendering does not update live access status. `last_success_at` means the mirror
+inspection succeeded; it does not certify that a caller published its output.
+
+The failure count and timestamps distinguish an isolated failure from repeated
+inaccessibility without inventing a deletion decision. HTTP 404 may mean lost
+read access or a missing file. An explicit Drive `trashed` value is reported
+separately and also fails the selected document without deleting its archive.
+Neither repeated failures nor a trash report changes selection or removes
+content. Retire sources only under the caller's explicit retention policy.
+See Google's [error definitions](https://developers.google.com/workspace/drive/api/guides/handle-errors)
+and [file metadata](https://developers.google.com/workspace/drive/api/reference/rest/v3/files).
+
 `--from-cache` is strictly offline and fails when required cached data is absent.
 `--crawl` deliberately discovers accessible linked documents and updates the
 configured discovery list; it expands future selection and should be requested
 explicitly. `--setup-cache` creates only the optional configured legacy cache
 link and refuses a conflicting existing path. Current attachment storage does
 not require callers to introduce a legacy link.
+The existing inaccessible-candidate cache suppresses crawl probes for at most
+24 hours; subsequent explicit crawls recheck access. It is not a permanent
+exclusion list. Selected documents are checked on each run regardless of that
+crawl cache.
 
 Advanced settings include `pandoc_command` (argv prefix), `pandoc_timeout`
 (positive seconds), optional `pandoc_memory_max` for available user-systemd
 scopes, and `readme_header` for an established archive's generated comment.
 `allow_unauthenticated` defaults to false; enabling public-document exports does
 not suppress a rejected configured credential. HTTP error bodies and credential
-values are not printed. Logs can still contain selected document names and
+values are not printed. Failure summaries include the document ID and fixed
+category so buffering cannot associate an error with another document's header.
+Logs and inspection status can still contain selected document names and
 identifiers and belong in private storage.

@@ -201,8 +201,9 @@ class Harness:
                 code = 3
             elif self.fail_publish:
                 code = 1
+            elif not scheduled.content_valid(cfg, kind, "committed"):
+                code = 3
             else:
-                assert scheduled.content_valid(cfg, kind, "committed")
                 self.published = self.snapshot()
                 self.pending = []
         return subprocess.CompletedProcess(args, code, output, b"")
@@ -280,13 +281,19 @@ def test_partial_later_day_failure_retains_earlier_publication(harness, monkeypa
     assert "synthetic confidential response" not in capsys.readouterr().err
 
 
-def test_source_drift_discards_only_by_explicit_policy_and_continues(harness, monkeypatch):
+def test_source_drift_preserves_paid_output_and_stops_before_new_model_work(harness, monkeypatch):
     harness.drift_once = True
     monkeypatch.setattr(scheduled, "daily_targets", lambda *_: ["2024-01-02", "2024-01-03"])
-    assert harness.invoke() == 0
-    assert list(harness.published) == ["summaries/2024-01-03.md"]
-    assert "recover:committed" in harness.events
-    assert len(harness.model_calls()) == 3
+    assert harness.invoke() == 1
+    candidate = harness.snapshot()
+    assert list(candidate) == ["summaries/2024-01-02.md"]
+    assert harness.published == {}
+    assert not any(event.startswith("recover") for event in harness.events)
+    calls = len(harness.model_calls())
+    assert calls == 2
+    assert harness.invoke() == 1
+    assert harness.snapshot() == candidate
+    assert len(harness.model_calls()) == calls
 
 
 def test_existing_dirty_complete_result_is_published_before_any_model(harness):

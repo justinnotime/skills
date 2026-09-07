@@ -241,3 +241,148 @@ def test_task_branch_cannot_be_interpreted_as_a_git_option(project):
         command(project, "prepare", "--worktree", project.base / "bad", "--task-branch=-force"),
         "cannot be an option",
     )
+
+
+def commit(
+    project,
+    target,
+    *,
+    selected="archive",
+    validation=None,
+    message=None,
+    source=None,
+    branch="writer/task",
+):
+    return command(
+        project,
+        "commit",
+        "--source-repository",
+        source or project.repo,
+        "--task-branch",
+        branch,
+        "--paths",
+        selected,
+        "--validate-command",
+        json.dumps(validation or [sys.executable, "-c", "pass"]),
+        "--message-command",
+        json.dumps(message or [sys.executable, "-c", "print('update: generated')"]),
+        repo=target,
+    )
+
+
+def test_commit_stages_exact_paths_and_runs_private_policy(project):
+    target = prepare(project)
+    (target / "archive/with spaces.md").write_text("paid result\n")
+    (target / "archive/seed.md").unlink()
+    check = [
+        sys.executable,
+        "-c",
+        (
+            "import os,subprocess; from pathlib import Path; "
+            "assert Path(os.environ['REPOSITORY_PUBLISH_REPOSITORY']).name=='checkout'; "
+            "assert subprocess.check_output(['git','diff','--cached','--name-only']).strip(); "
+            "assert not subprocess.check_output(['git','diff','--name-only']).strip()"
+        ),
+    ]
+    result = commit(
+        project,
+        target,
+        validation=check,
+        message=[sys.executable, "-c", "print('update: generated\\n\\nCaller: synthetic')"],
+    )
+    success(result)
+    assert project.git("log", "-1", "--format=%B", root=target).endswith("Caller: synthetic")
+    assert project.git("status", "--porcelain", root=target) == ""
+    assert project.git("show", "HEAD:archive/with spaces.md", root=target) == "paid result"
+    assert project.git("rev-parse", "origin/main", root=target) == project.initial
+    assert commit(project, target).returncode == 2
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "main",
+        "wrong-branch",
+        "other-repository",
+        "unowned",
+        "untracked",
+        "rename",
+        "validation",
+        "message",
+        "hook",
+    ],
+)
+def test_commit_failure_preserves_files_and_revision(project, problem):
+    target = prepare(project)
+    output = target / "archive/result.md"
+    output.write_text("paid result\n")
+    options = {}
+    expected = ""
+    if problem == "main":
+        target = project.repo
+        expected = "linked worktree"
+    elif problem == "wrong-branch":
+        options["branch"] = "wrong"
+        expected = "unexpected branch"
+    elif problem == "other-repository":
+        other = project.base / "unrelated"
+        project.run(["git", "init", str(other)])
+        options["source"] = other
+        expected = "another repository"
+    elif problem in {"unowned", "untracked"}:
+        (target / ("outside.md" if problem == "unowned" else "other-draft.md")).write_text("keep\n")
+        expected = "outside its ownership"
+    elif problem == "rename":
+        project.git("mv", "outside.md", "archive/moved.md", root=target)
+        expected = "outside its ownership"
+    elif problem == "validation":
+        options["validation"] = [sys.executable, "-c", "raise SystemExit(7)"]
+        expected = "policy command failed"
+    elif problem == "message":
+        options["message"] = [sys.executable, "-c", "pass"]
+        expected = "empty commit message"
+    else:
+        hook = project.repo / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        expected = "commit failed"
+    before = project.git("rev-parse", "HEAD", root=target)
+    failure(commit(project, target, **options), expected)
+    assert output.read_text() == "paid result\n"
+    assert project.git("rev-parse", "HEAD", root=target) == before
+    assert project.git("rev-parse", "origin/main") == project.initial
+
+
+def test_commit_rejects_policy_that_changes_staged_content(project):
+    target = prepare(project)
+    (target / "archive/result.md").write_text("original paid result\n")
+    validation = [
+        sys.executable,
+        "-c",
+        ("from pathlib import Path; Path('archive/result.md').write_text('changed by policy\\n')"),
+    ]
+    failure(commit(project, target, validation=validation), "modified tracked repository content")
+    assert project.git("rev-parse", "HEAD", root=target) == project.initial
+    assert project.git("show", ":archive/result.md", root=target) == "original paid result"
+
+
+@pytest.mark.parametrize("callback", ["validation", "message"])
+def test_commit_rejects_callback_staging_an_unowned_file(project, callback):
+    target = prepare(project)
+    (target / "archive/result.md").write_text("paid result\n")
+    options = {
+        callback: [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess; from pathlib import Path; "
+                "Path('outside.md').write_text('unowned callback change\\n'); "
+                "subprocess.run(['git','add','--','outside.md'], check=True); "
+                "print('update: generated')"
+            ),
+        ]
+    }
+    failure(commit(project, target, **options), "modified tracked repository content")
+    assert project.git("rev-parse", "HEAD", root=target) == project.initial
+    assert project.git("show", ":archive/result.md", root=target) == "paid result"
+    assert project.git("rev-parse", "origin/main") == project.initial

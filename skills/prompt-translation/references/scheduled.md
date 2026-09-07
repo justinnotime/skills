@@ -45,8 +45,7 @@ This is separate from the translator configuration described in
   },
   "job": {
     "validate_command": ["/private/policy", "validate", "{worktree}", "{scope}"],
-    "commit_command": ["/private/policy", "commit", "{worktree}", "{scope}"],
-    "recover_command": ["/private/policy", "recover", "{worktree}", "{scope}"]
+    "commit_command": ["/private/policy", "commit", "{worktree}", "{scope}"]
   },
   "selection": {
     "since_date": "2025-01-01",
@@ -126,24 +125,22 @@ caller-owned programs; document text never selects them.
   when the complete change set is owned, permitted deletions have replacements,
   strict `scripts/validate` succeeds, and repository policy accepts the change.
   Validation must not modify content. Repository lint belongs here.
-- `commit` receives scope `worktree`. It stages and commits only the validated
-  generated paths, with any required private metadata. Return zero on success
+- `commit` receives scope `worktree`. It can delegate to the public publisher's
+  `worktree commit` with explicit source repository, task branch, owned paths
+  and private validate/message commands. Return zero on success
   or 2 for no differences. Remaining dirty files are still an error.
 - Optional `message_command` receives scope `committed` and prints the complete
   commit message. The publisher invokes it after post-rebase validation to
   refresh metadata derived from current repository rules. A validator must not
   reject merely outdated metadata that this message command is meant to refresh.
-- Optional `recover_command` receives `worktree` for invalid interrupted output
-  or `committed` after the publisher rejects rebased output with exit 3. It owns
-  the decision about which generated files may be discarded. It must verify
-  ownership before deleting anything and leave no dirty files; committed recovery
-  must also leave no unpublished commits. Without this explicit command, invalid
-  results remain in place and the schedule stops before making new model calls.
+- Older profiles may contain `recover_command`; it is accepted for compatibility
+  but is not executed. Remove it when updating the private profile. Invalid
+  results remain in place and the schedule stops before new model calls.
 
 Use strict source validation for publication. `--allow-source-ahead` is for
 separate structural inspections and does not establish that a publishable output
 covers the current source. Keep repository-specific file rules, lint baselines,
-acknowledgements and permitted recovery deletions out of the public package.
+acknowledgements out of the public package.
 
 ## Progress and failure behavior
 
@@ -161,11 +158,12 @@ translator's process group, allows 30 seconds to exit, then kills remaining
 processes if needed; completed files are still considered for publication.
 
 A rejected push, rebase conflict, failed commit or failed validation preserves
-completed files or unpublished commits for the next invocation. Explicit
-recovery may discard outputs whose sources changed after generation. If this
-happens while publishing newly generated work, the run returns failure; it does
-not make another model call in the same invocation. An already stale commit
-from a preceding invocation can be recovered before beginning the next run.
+completed files or unpublished commits for the next invocation. Source changes
+are treated the same way: validation failure does not authorize discarding paid
+output. A retry attempts validation/publication before any new model work. If a
+candidate is genuinely obsolete, inspect the changed sources, retain the
+completed translations, and have the caller decide how to correct or regenerate
+it. Do not reset its branch or remove the worktree just to make a run pass.
 
 Exit 0 means completion or a busy task-lock skip; the skip is logged explicitly.
 A failed translation retains its nonzero status after any completed files are

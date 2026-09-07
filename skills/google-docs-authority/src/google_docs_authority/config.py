@@ -129,6 +129,7 @@ def load(path, root_override=None):
             "source_list",
             "discovered_list",
             "state_file",
+            "status_file",
             "cache_directory",
             "cache_link",
             "engine",
@@ -167,13 +168,23 @@ def load(path, root_override=None):
             if target == root or not target.is_relative_to(root):
                 raise ValueError("config-mirror-path-outside-repository")
             mirror[key] = target
-        for key in ("state_file", "cache_directory"):
+        for key in ("state_file", "cache_directory", "status_file"):
+            if key == "status_file" and key not in mirror:
+                continue
             target = resolve(mirror.get(key))
             if target == root or target.is_relative_to(root):
                 raise ValueError("config-mirror-runtime-path-inside-repository")
             mirror[key] = target
         if mirror["state_file"] in {
             path,
+            value.get("read_token_file"),
+            value.get("write_token_file"),
+        }:
+            raise ValueError("config-output-must-be-distinct")
+        if "status_file" in mirror and mirror["status_file"] in {
+            path,
+            mirror["state_file"],
+            mirror["cache_directory"],
             value.get("read_token_file"),
             value.get("write_token_file"),
         }:

@@ -24,6 +24,9 @@ Use the caller's transaction publisher when the output belongs in Git. See
 [mirror configuration](references/mirror.md) for incremental state, image
 preservation, redaction and failure behavior. `--doctor` checks local dependencies;
 `--dry-run` lists selected documents. Neither proves live document access.
+With private `mirror.status_file` configured, `--status` inspects failure streaks
+and recovery independently of publication progress. Repeated 404 responses do
+not establish deletion; even an explicit trash report retains the local mirror.
 
 Use [authorization and inspection tools](references/tools.md) to obtain a
 user-authorized credential, render PDF pages, or compare native and HTML exports.

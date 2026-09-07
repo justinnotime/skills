@@ -161,6 +161,8 @@ def load_schedule(path: Path) -> dict:
         or job.keys() - {"validate_command", "commit_command", "recover_command"}
     ):
         raise ScheduleError("invalid_job_policy")
+    # Read old profiles without invoking their former output-discard command.
+    job.pop("recover_command", None)
     for key in job:
         job[key] = command(job[key])
     environment = cfg.get("environment", {})
@@ -304,37 +306,22 @@ def ahead(cfg: dict) -> int:
 
 
 def policy(cfg: dict, mode: str, scope: str = "worktree") -> int:
-    argv = cfg["job"].get(mode + "_command")
-    if not argv:
-        raise ScheduleError("recovery_requires_explicit_policy")
+    argv = cfg["job"][mode + "_command"]
     return call(expand(argv, cfg, scope), cfg, cwd=cfg["worktree"]).returncode
 
 
-def recover(cfg: dict, scope: str) -> None:
-    if (
-        policy(cfg, "recover", scope)
-        or inspect(cfg, "changed")
-        or (scope == "committed" and ahead(cfg))
-    ):
-        raise ScheduleError("recovery_failed_outputs_retained")
-
-
-def commit_completed(cfg: dict, *, recovering: bool = False) -> None:
+def commit_completed(cfg: dict) -> None:
     if not inspect(cfg, "changed"):
         return
     if policy(cfg, "validate"):
-        if recovering:
-            recover(cfg, "worktree")
-            return
         raise ScheduleError("translation_validation_failed_outputs_retained")
     if policy(cfg, "commit") not in {0, 2} or inspect(cfg, "changed"):
         raise ScheduleError("commit_failed_outputs_retained")
 
 
-def publish_completed(cfg: dict) -> bool:
-    """Return False only when the caller's policy discarded stale generated files."""
+def publish_completed(cfg: dict) -> None:
     if not ahead(cfg):
-        return True
+        return
     publication = cfg["publication"]
     argv = [
         "--repo",
@@ -363,14 +350,10 @@ def publish_completed(cfg: dict) -> bool:
             json.dumps(expand(publication["message_command"], cfg, "committed")),
         ]
     result = publisher(cfg, *argv)
-    if result.returncode == 3:
-        recover(cfg, "committed")
-        return False
     if result.returncode:
         raise ScheduleError("publication_failed_outputs_retained")
     if inspect(cfg, "changed") or ahead(cfg):
         raise ScheduleError("publication_incomplete_outputs_retained")
-    return True
 
 
 def translator_command(cfg: dict, root: str, arguments: list[str]) -> list[str]:
@@ -440,7 +423,7 @@ def run(cfg: dict, arguments: list[str]) -> int:
     )
     if result.returncode:
         raise ScheduleError("worktree_preparation_failed")
-    commit_completed(cfg, recovering=True)
+    commit_completed(cfg)
     publish_completed(cfg)
     result = publisher(
         cfg,
@@ -461,8 +444,7 @@ def run(cfg: dict, arguments: list[str]) -> int:
     # Each completed file contains its own progress. A later LLM failure or a
     # timeout must not discard earlier paid results or hide the failing status.
     commit_completed(cfg)
-    if not publish_completed(cfg):
-        raise ScheduleError("inputs_changed_outputs_discarded_by_policy")
+    publish_completed(cfg)
     print(f"translation schedule complete: translator_status={status}", flush=True)
     return status
 

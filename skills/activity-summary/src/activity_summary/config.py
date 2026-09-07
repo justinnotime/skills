@@ -196,8 +196,11 @@ def load(path: str | Path, root: str | Path | None = None) -> dict:
                 or plock.is_relative_to(wt)
             ):
                 raise ConfigurationError("separate_publish_lock_required")
-        for key in ("validate_command", "commit_command", "message_command", "recover_command"):
+        for key in ("validate_command", "commit_command", "message_command"):
             schedule["policy"][key] = command(schedule["policy"][key])
+        # Older profiles may contain recover_command. It is intentionally ignored:
+        # validation failure never authorizes discarding completed model output.
+        schedule["policy"].pop("recover_command", None)
         selection = section.setdefault("selection", {})
         for key, default in (("lookback_days", 14), ("repair_days", 3), ("max_dates", 3)):
             selection[key] = integer(selection.get(key, default), 0 if key == "repair_days" else 1)

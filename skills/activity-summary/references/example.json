@@ -105,13 +105,6 @@
           "{worktree}",
           "{scope}",
           "{kind}"
-        ],
-        "recover_command": [
-          "$HOME/.config/activity-summary/policy",
-          "recover",
-          "{worktree}",
-          "{scope}",
-          "{kind}"
         ]
       }
     },
@@ -190,13 +183,6 @@
         "message_command": [
           "$HOME/.config/activity-summary/policy",
           "message",
-          "{worktree}",
-          "{scope}",
-          "{kind}"
-        ],
-        "recover_command": [
-          "$HOME/.config/activity-summary/policy",
-          "recover",
           "{worktree}",
           "{scope}",
           "{kind}"

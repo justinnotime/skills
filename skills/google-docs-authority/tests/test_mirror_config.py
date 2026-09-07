@@ -67,7 +67,7 @@ def test_paths_cannot_escape_transaction_root(tmp_path, field):
         load(write(path, value))
 
 
-@pytest.mark.parametrize("field", ["state_file", "cache_directory"])
+@pytest.mark.parametrize("field", ["state_file", "cache_directory", "status_file"])
 def test_external_runtime_files_cannot_be_placed_inside_archive_repository(
     tmp_path, field
 ):
@@ -82,6 +82,25 @@ def test_state_cannot_overwrite_token(tmp_path):
     value["mirror"]["state_file"] = value["read_token_file"]
     with pytest.raises(ValueError, match="distinct"):
         load(write(path, value))
+
+
+@pytest.mark.parametrize(
+    "target", ["config.json", "read.json", "progress.json", "cache"]
+)
+def test_status_cannot_overwrite_configuration_credential_or_progress(tmp_path, target):
+    path, value = fixture(tmp_path)
+    value["mirror"]["status_file"] = target
+    with pytest.raises(ValueError, match="distinct"):
+        load(write(path, value))
+
+
+def test_status_is_external_and_not_rebased_with_transaction(tmp_path):
+    path, value = fixture(tmp_path)
+    value["mirror"]["status_file"] = "status.json"
+    transaction = tmp_path / "transaction"
+    transaction.mkdir()
+    cfg = load(write(path, value), transaction)
+    assert cfg["mirror"]["status_file"] == tmp_path / "status.json"
 
 
 def test_absent_redactor_needs_explicit_policy_choice(tmp_path):

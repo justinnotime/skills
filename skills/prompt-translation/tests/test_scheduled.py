@@ -214,10 +214,13 @@ def test_interrupted_completed_output_is_published_before_new_work(job):
     assert job.state()["published"] == 1
 
 
-def test_invalid_interrupted_output_requires_explicit_recovery_before_new_work(job):
+def test_invalid_interrupted_output_is_retained_without_new_model_work(job):
     job.set_state(changed=["learning/pairs/incomplete.md"], validate_status=1)
-    assert job.run() == 0
-    assert job.events().index("recover_worktree") < job.events().index("translate")
+    assert job.run() == 1
+    assert job.run() == 1
+    assert job.state()["changed"] == ["learning/pairs/incomplete.md"]
+    assert "recover_worktree" not in job.events()
+    assert "translate" not in job.events()
 
 
 def test_missing_recovery_policy_keeps_output_and_stops(job):
@@ -235,17 +238,23 @@ def test_recovery_rejection_never_discards_foreign_output(job):
     assert "translate" not in job.events()
 
 
-def test_stale_previous_commit_uses_explicit_recovery_then_continues(job):
+def test_stale_previous_commit_is_retained_without_new_model_work(job):
     job.set_state(ahead=1, publish_status=3)
-    assert job.run() == 0
-    assert job.events().index("recover_committed") < job.events().index("translate")
+    assert job.run() == 1
+    assert job.run() == 1
+    assert job.state()["ahead"] == 1
+    assert "recover_committed" not in job.events()
+    assert "translate" not in job.events()
 
 
 def test_stale_new_translation_reports_failure_without_second_model_call(job):
     job.set_state(stale_after_translation=True)
     assert job.run() == 1
     assert job.state()["translations"] == 1
-    assert "recover_committed" in job.events()
+    assert "recover_committed" not in job.events()
+    assert job.state()["ahead"] == 1
+    assert job.run() == 1
+    assert job.state()["translations"] == 1
 
 
 def test_failed_new_validation_preserves_completed_output_for_next_run(job):

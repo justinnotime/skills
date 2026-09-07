@@ -158,22 +158,10 @@ def content_valid(cfg, kind, scope):
     return True
 
 
-def recover(cfg, kind, scope):
-    if (
-        policy(cfg, kind, "recover", scope)
-        or inspect(cfg, kind, "changed")
-        or (scope == "committed" and ahead(cfg, kind))
-    ):
-        raise ScheduleError("recovery_failed_output_preserved")
-
-
-def commit_completed(cfg, kind, recovering=False):
+def commit_completed(cfg, kind):
     if not inspect(cfg, kind, "changed"):
         return
     if not content_valid(cfg, kind, "worktree"):
-        if recovering:
-            recover(cfg, kind, "worktree")
-            return
         raise ScheduleError("candidate_changed_output_preserved")
     if policy(cfg, kind, "validate"):
         raise ScheduleError("private_validation_failed_output_preserved")
@@ -183,7 +171,7 @@ def commit_completed(cfg, kind, recovering=False):
 
 def publish_completed(cfg, kind):
     if not ahead(cfg, kind):
-        return True
+        return
     schedule = cfg[kind]["schedule"]
     publication = schedule["publication"]
     validator = [
@@ -223,14 +211,10 @@ def publish_completed(cfg, kind):
     if "publish_lock" in publication:
         argv += ["--publish-lock", publication["publish_lock"]]
     result = publisher(cfg, kind, *argv)
-    if result.returncode == 3 and not content_valid(cfg, kind, "committed"):
-        recover(cfg, kind, "committed")
-        return False
     if result.returncode:
         raise ScheduleError("publication_failed_output_preserved")
     if inspect(cfg, kind, "changed") or ahead(cfg, kind):
         raise ScheduleError("publication_incomplete_output_preserved")
-    return True
 
 
 def reset(cfg, kind):
@@ -487,7 +471,7 @@ def run(cfg, kind, args):
             pub["branch"],
         ).returncode:
             raise ScheduleError("worktree_preparation_failed")
-        commit_completed(cfg, kind, recovering=True)
+        commit_completed(cfg, kind)
         publish_completed(cfg, kind)
         reset(cfg, kind)
     if kind == "daily":
@@ -516,7 +500,6 @@ def run(cfg, kind, args):
                 raise ScheduleError("input_refresh_failed")
             reset(cfg, kind)
     authenticated = False
-    deferred = 0
     for target in targets:
         blob, data, missing = source_input(cfg, kind, root, target)
         digest = hashlib.sha256(blob).hexdigest()
@@ -555,12 +538,8 @@ def run(cfg, kind, args):
             authenticated = True
         generate(cfg, kind, root, target, blob, data, missing)
         commit_completed(cfg, kind)
-        if not publish_completed(cfg, kind):
-            deferred += 1
-            if kind == "weekly":
-                raise ScheduleError("inputs_changed_candidate_discarded_by_policy")
-            continue
-    print(f"OK {kind}: selected={len(targets)} deferred_changed_inputs={deferred}")
+        publish_completed(cfg, kind)
+    print(f"OK {kind}: selected={len(targets)}")
     return 0
 
 

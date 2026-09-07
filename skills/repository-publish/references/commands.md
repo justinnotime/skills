@@ -98,6 +98,28 @@ defaulting to `origin` and `main`. Path listings include both sides of renames;
 use `--null` for NUL-delimited paths, including filenames containing newlines.
 Without it, such names fail before any partial path list is printed.
 
+A completed generated candidate can be committed without copying Git staging
+logic into private policy:
+
+```bash
+scripts/publish worktree commit --repo /private/task-worktree \
+  --source-repository /private/repository --task-branch task/messages \
+  --paths archive/messages \
+  --validate-command '["/private/policy", "validate", "{worktree}"]' \
+  --message-command '["/private/policy", "message", "{worktree}"]'
+```
+
+`commit` requires a linked worktree belonging to the explicitly selected source
+repository, the expected task branch distinct from the publication branch, and
+literal owned paths. Every changed path, including untracked files and both
+sides of a rename, must be owned. It stages the exact observed paths, runs the
+read-only validator and message command, then creates the commit. Validation and
+message commands are required; they keep repository rules and metadata private.
+Exit 2 means no changes. A failed command leaves generated files and any staged
+content available for inspection; it never resets or removes output, fetches,
+pushes, or calls a model. The caller holds its task lock across generation,
+commit and publication. Existing-worktree publication remains a separate step.
+
 To run an explicit validation command against a historical revision in a
 temporary, complete checkout:
 

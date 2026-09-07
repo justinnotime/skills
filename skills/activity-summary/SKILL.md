@@ -29,8 +29,8 @@ uv sync --project /path/to/activity-summary --locked
 
 The runtime uses Python 3.10 or later and the standard library. Normal scheduled
 publication also needs Git, the configured Claude CLI, a configured external
-`repository-publish` executable and caller-provided validation/commit/message/
-recovery commands. This package does not import another Skill or a private
+`repository-publish` executable and caller-provided validation/commit/message
+commands. This package does not import another Skill or a private
 repository library. Set `ACTIVITY_SUMMARY_PYTHON` to choose its interpreter.
 
 For mechanical inspection:

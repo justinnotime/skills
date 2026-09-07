@@ -54,18 +54,18 @@ uncommitted progress database. Do not delete a worktree with unpublished output.
 
 The publisher fetches/rebases and then calls this package's content validation
 again against the updated sources before invoking the private validator.
-On source drift, only the explicitly configured recovery policy may discard
-generated paths. Daily reports the deferred count and continues the remaining
-selected dates, returning zero after those are handled. Weekly returns nonzero
-after discarding the obsolete candidate. Push, private-validation, commit and
-unexpected-path errors preserve output and return nonzero.
+Source drift and private validation failures preserve candidates and unpublished
+commits, return nonzero, and stop before further model work. A retry validates
+and attempts publication of that retained output first. It does not interpret
+validation failure as permission to delete output or purchase it again.
 
 The public runtime never deletes unrelated files or resets Git itself; all Git
-worktree/publication operations are external publisher commands. Recovery is a
-separate, explicit caller policy. Any interruption between atomic installation
-and commit leaves the complete file in the worktree for the next run. An abrupt
-kill during temporary-file writing can leave an unowned temporary file; the
-runner stops for inspection rather than silently deleting it.
+worktree/publication operations are external publisher commands. Any interruption
+between atomic installation and commit leaves the complete file in the worktree
+for the next run. An abrupt kill during temporary-file writing can leave an
+unowned temporary file; the runner stops for inspection rather than deleting it.
+For genuinely obsolete output, inspect the changed sources, preserve the paid
+candidate, and obtain the caller's decision about correction or regeneration.
 
 ## Private policy contract
 
@@ -76,13 +76,13 @@ Every policy argv supports `{repository}`, `{worktree}`, `{scope}` and `{kind}`.
 | Command | Required behavior |
 | --- | --- |
 | `validate_command` | Read-only ownership and repository-specific checks; exit 0 to permit publication |
-| `commit_command` | Commit only validated owned paths; exit 0 or 2 for no changes; must leave a clean worktree |
+| `commit_command` | Invoke the configured publisher's `worktree commit` with private validate/message commands; exit 0 or 2 for no changes; must leave a clean worktree |
 | `message_command` | Print the complete commit message with current caller-required trailers; the publisher can refresh it after rebase |
-| `recover_command` | Independently verify ownership and branch, then restore only invalid generated paths or discard only their unpublished commits |
 
 Content hashes and structural validators remain public. Local lint baselines,
-commit acknowledgements, author identity and allowed recovery paths remain
-private. Publication validation runs before message refresh; do not reject an
+commit acknowledgements and author identity remain private. Older configurations
+may contain `recover_command`; it is accepted for compatibility and is not
+executed. Remove it when updating the private profile. Publication validation runs before message refresh; do not reject an
 otherwise valid commit merely because a rebase made its previous acknowledgement
 stale. The message command must generate the current required metadata.
 

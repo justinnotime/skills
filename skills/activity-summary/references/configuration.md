@@ -97,8 +97,9 @@ Each `daily.schedule` or `weekly.schedule` has:
   files there. Without this setting, raw failure contents are not retained.
 - `publication`: `owned_paths`, `subject`, optional `remote` (origin), `branch`
   (main), `agent` and external `publish_lock`.
-- `policy`: `validate_command`, `commit_command`, `message_command` and
-  `recover_command` arrays. See [scheduling](scheduling.md) for their contracts.
+- `policy`: `validate_command`, `commit_command` and `message_command` arrays.
+  Older `recover_command` entries are ignored. See [scheduling](scheduling.md)
+  for the policy contracts and retained-output behavior.
 
 `daily.selection` defaults to `lookback_days: 14`, `repair_days: 3`, `max_dates: 3`.
 `weekly.wait_inputs_seconds` defaults to 1500. None of these settings installs a

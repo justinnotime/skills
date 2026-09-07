@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -203,7 +204,7 @@ def test_preflight_transport_failure_exports_and_saves_checkpoint(
     replacement = b"# Sample\n\nUpdated words from the full export.\n"
 
     def metadata(doc_id, fields):
-        assert fields == "version,name"
+        assert fields == "version,name,trashed"
         calls.append("preflight")
         raise failure
 
@@ -288,7 +289,7 @@ def test_export_links_metadata_failure_keeps_checkpoint(profile, monkeypatch):
 
     def metadata(doc_id, fields):
         calls.append(fields)
-        if fields == "version,name":
+        if fields == "version,name,trashed":
             return {"version": "1", "name": "Sample"}
         assert fields == "exportLinks"
         raise URLError("synthetic outage")
@@ -313,7 +314,7 @@ def test_export_links_metadata_failure_keeps_checkpoint(profile, monkeypatch):
         ),
     )
     assert run(profile) == 1
-    assert calls == ["version,name", "exportLinks"]
+    assert calls == ["version,name,trashed", "exportLinks"]
     assert checkpoint.read_bytes() == before
 
 
@@ -423,6 +424,184 @@ def test_crawl_transport_failure_does_not_checkpoint(profile, monkeypatch):
     assert run(profile, "--crawl") == 1
     assert not Path(profile[1]["mirror"]["state_file"]).exists()
     assert not (profile[2] / "discovered.yaml").exists()
+
+
+def test_failures_name_the_document_and_status_survives_failed_transaction(
+    profile, monkeypatch, capsys
+):
+    status_file = profile[0].parent / "status.json"
+    profile[1]["mirror"]["status_file"] = str(status_file)
+    configure(profile)
+    (profile[2] / "sources.yaml").write_text(
+        yaml.safe_dump(
+            {"docs": [{"id": DOC_ID, "slug": "one"}, {"id": SECOND_ID, "slug": "two"}]}
+        )
+    )
+    checkpoint = Path(profile[1]["mirror"]["state_file"])
+    checkpoint.write_text('{"previous": "published checkpoint"}\n')
+    before = checkpoint.read_bytes()
+
+    def sync(doc, state, **kwargs):
+        state[doc["id"]] = {"updated": True}
+        if doc["id"] == SECOND_ID:
+            raise HTTPError(
+                "https://example.invalid?token=private-token",
+                404,
+                "private-message",
+                {},
+                io.BytesIO(b"private-body"),
+            )
+        return "updated"
+
+    monkeypatch.setattr(mirror, "sync_doc", sync)
+    assert run(profile) == 1
+    assert checkpoint.read_bytes() == before
+    status = json.loads(status_file.read_text())["documents"]
+    assert status[DOC_ID]["last_success_at"]
+    assert status[SECOND_ID]["consecutive_failures"] == 1
+    assert status[SECOND_ID]["http_status"] == 404
+    output = capsys.readouterr()
+    assert (
+        f"FAIL document={SECOND_ID} category=inaccessible http_status=404" in output.err
+    )
+    assert f"FAIL document={DOC_ID}" not in output.err
+    assert all(
+        secret not in output.out + output.err + status_file.read_text()
+        for secret in (
+            "example.invalid",
+            "private-token",
+            "private-message",
+            "private-body",
+        )
+    )
+    assert run(profile) == 1
+    assert (
+        json.loads(status_file.read_text())["documents"][SECOND_ID][
+            "consecutive_failures"
+        ]
+        == 2
+    )
+    monkeypatch.setattr(mirror, "sync_doc", lambda *a, **k: "unchanged")
+    assert run(profile) == 0
+    assert (
+        f"document={SECOND_ID} recovered after 2 failed inspection(s)"
+        in capsys.readouterr().out
+    )
+
+
+def test_status_is_read_only_and_independent_of_bad_checkpoint(
+    profile, monkeypatch, capsys
+):
+    status_file = profile[0].parent / "status.json"
+    profile[1]["mirror"]["status_file"] = str(status_file)
+    configure(profile)
+    Path(profile[1]["mirror"]["state_file"]).write_text("malformed checkpoint")
+    monkeypatch.setattr(
+        mirror, "sync_doc", lambda *a, **k: pytest.fail("status invoked writer")
+    )
+    assert run(profile, "--status", "--only", DOC_ID) == 0
+    assert json.loads(capsys.readouterr().out)["documents"] == {DOC_ID: None}
+    assert not status_file.exists()
+    assert not (profile[2] / "archive").exists()
+
+
+def test_offline_render_does_not_change_live_access_status(profile, monkeypatch):
+    status_file = profile[0].parent / "status.json"
+    profile[1]["mirror"]["status_file"] = str(status_file)
+    configure(profile)
+    monkeypatch.setattr(mirror, "sync_doc", lambda *a, **k: "unchanged")
+    assert run(profile, "--from-cache") == 0
+    assert not status_file.exists()
+
+
+def test_status_cannot_overwrite_transaction_checkpoint(profile):
+    status_file = profile[0].parent / "status.json"
+    profile[1]["mirror"]["status_file"] = str(status_file)
+    configure(profile)
+    assert run(profile, "--state-file", str(status_file)) == 1
+    assert not status_file.exists()
+
+
+@pytest.mark.parametrize(
+    "other_mode",
+    ["--setup-cache", "--doctor", "--dry-run", "--crawl", "--force", "--from-cache"],
+)
+def test_status_rejects_conflicting_modes_without_side_effects(profile, other_mode):
+    assert run(profile, "--status", other_mode) == 1
+    assert not Path(profile[1]["mirror"]["cache_directory"]).exists()
+    assert not (profile[2] / "archive").exists()
+
+
+@pytest.mark.parametrize("http_status", [401, 403, 404])
+def test_preflight_access_failure_does_not_try_export(
+    profile, monkeypatch, http_status, capsys
+):
+    def metadata(*args):
+        raise HTTPError(
+            "https://example.invalid", http_status, "private-detail", {}, None
+        )
+
+    monkeypatch.setattr(mirror, "drive_meta", metadata)
+    monkeypatch.setattr(
+        mirror,
+        "fetch_markdown",
+        lambda *a, **k: pytest.fail("export after rejected access"),
+    )
+    assert run(profile) == 1
+    assert f"document={DOC_ID}" in capsys.readouterr().err
+    assert not Path(profile[1]["mirror"]["state_file"]).exists()
+
+
+def test_explicit_trash_retains_archive_selection_and_checkpoint(
+    profile, monkeypatch, capsys
+):
+    export(monkeypatch, "# Sample\n\nOriginal words.\n")
+    assert run(profile) == 0
+    checkpoint = Path(profile[1]["mirror"]["state_file"])
+    before = checkpoint.read_bytes()
+    document = profile[2] / "archive/sample--syntheti/README.md"
+    original = document.read_bytes()
+    sources = (profile[2] / "sources.yaml").read_bytes()
+    monkeypatch.setattr(
+        mirror,
+        "drive_meta",
+        lambda *a: {"version": "2", "name": "Sample", "trashed": True},
+    )
+    assert run(profile) == 1
+    assert f"document={DOC_ID} category=trashed" in capsys.readouterr().err
+    assert document.read_bytes() == original
+    assert checkpoint.read_bytes() == before
+    assert (profile[2] / "sources.yaml").read_bytes() == sources
+
+
+@pytest.mark.parametrize("age_hours, expected_probe", [(1, False), (25, True)])
+def test_crawl_rechecks_inaccessible_after_cooldown(
+    profile, monkeypatch, age_hours, expected_probe
+):
+    output = profile[2] / "archive/one"
+    output.mkdir(parents=True)
+    (output / "README.md").write_text(
+        f"https://docs.google.com/document/d/{SECOND_ID}/edit\n"
+    )
+    checked_at = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+    state = {
+        "_inaccessible": {
+            SECOND_ID: {"checked_at": checked_at, "reason": "fetch failed"}
+        }
+    }
+    probes = []
+
+    def fetch(doc_id):
+        probes.append(doc_id)
+        return (
+            b'<title>Recovered</title><p class="title" id="h.synthetic">Recovered</p>'
+        )
+
+    monkeypatch.setattr(mirror, "fetch_html", fetch)
+    result = mirror.crawl_for_new_docs(state)
+    assert bool(result) == expected_probe
+    assert probes == ([SECOND_ID] if expected_probe else [])
+    assert (SECOND_ID in state["_inaccessible"]) != expected_probe
 
 
 def test_rendering_helpers_preserve_code_and_unicode():

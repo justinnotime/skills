@@ -195,6 +195,20 @@ Do not silently narrow source selection or grant another machine writer access
 while changing implementation. Keep one active writer for each owned output.
 A failed source read must follow the explicitly chosen failure policy; treating
 an error as an empty successful result can discard data or advance progress.
+If one reader must fail independently, give it a separate transaction with its
+own task lock, owned paths and progress directory. Share the repository's
+publication lock. Ignoring its exit status inside a shared transaction can
+publish partial output; a separate job avoids that ambiguity without another
+scheduling layer. Keep diagnostic attempt history outside success-only progress
+and distinguish a successful source check from successful publication.
+
+A model-generated candidate that fails validation is still valuable output.
+Preserve it and stop rather than automatically resetting it and paying to
+regenerate. After correcting a policy or environment failure, validate and
+publish the same candidate. Truly outdated source provenance needs an explicit
+reviewed revision or regeneration decision. Use the public publisher's bounded
+existing-worktree commit interface rather than copying Git staging and reset
+logic into each private policy.
 
 When changing HOME or repository location, inspect every resolved path and
 installed command again. Quote shell paths, including paths containing spaces;
