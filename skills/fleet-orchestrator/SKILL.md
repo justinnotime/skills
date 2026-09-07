@@ -37,10 +37,15 @@ fleet environment variable. Listing and entering do not start offline fleets.
 
 Ordinary local fleets are the live tmux session groups on the configured server;
 their names select separate task and message stores without a fleet profile.
-`orc fleet start NAME` starts or reuses a session, `orc fleet window [NAME]`
-adds a window, and `orc fleet stop [NAME]` terminates its windows and agents,
+No separate `tmux new-session` step is required: `orc fleet start NAME` creates
+or reuses the named tmux session. `orc fleet window [NAME]` adds a window, and
+`orc fleet stop [NAME]` terminates its windows and agents,
 including grouped viewer sessions, while retaining saved work. Omitted names
 use the current session. Native tmux sessions are discovered automatically.
+`tview --fleet NAME` opens a view of the same windows; its grouped viewer
+sessions do not duplicate agents or create another fleet. Creating terminals
+and starting/registering agents are separate operations; follow normal
+[agent onboarding](references/agent-bus.md#join-the-current-session).
 `orc fleet rename OLD NEW` preserves processes and saved work without moving
 open databases. A raw tmux rename changes the live display name; use the ORC
 rename command to retain a new history name after the session ends.

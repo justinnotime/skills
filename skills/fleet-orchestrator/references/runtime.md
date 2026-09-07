@@ -29,19 +29,36 @@ for exact arguments. `orc tick --dry-run` previews scheduler actions without
 sending them; a real `tick` may execute configured checks and send task reminders.
 Scheduling belongs to the caller. Do not run a real tick for a status request.
 
-Ordinary local fleets are native tmux sessions: the session name selects the
+Ordinary local fleets are native tmux session groups: the session name selects the
 task and message stores. There is no separate local fleet configuration to
 create, synchronize or delete. A session made with native tmux commands is
 discovered too. Existing explicit local/Matrix profiles remain supported for
 compatibility and configured network transports.
 
+You do not need to create a tmux session first. Start or reuse a workgroup and
+enter its windows with:
+
 ```bash
-orc fleet start example       # start or reuse the named tmux session
-tview --fleet example        # enter its existing windows
-orc fleet window example     # add a window; inside it, the name is optional
-orc fleet stop example       # terminate its windows and agents
-orc fleet rename example renamed  # keep processes and history under a new name
+orc fleet start example
+tview --fleet example
 ```
+
+Tmux still owns the terminals and their processes. ORC coordinates their
+lifecycle with saved work; tview provides a grouped view of the existing
+windows. A viewer can have its own tmux session name while sharing those same
+windows and agents. It is not another workgroup or a new set of agents.
+Starting/registering an agent remains a separate
+[onboarding operation](agent-bus.md#join-the-current-session).
+
+These are independent operations, not a sequence to run together:
+
+| Operation | Command | Effect on tmux |
+|---|---|---|
+| Start or resume a workgroup | `orc fleet start NAME` | Create or reuse its named session |
+| Enter its terminals | `tview --fleet NAME` | View the same shared windows |
+| Add a terminal | `orc fleet window [NAME]` | Create a window in the selected session |
+| Rename a workgroup | `orc fleet rename OLD NEW` | Rename the session and retain its history association |
+| End a workgroup | `orc fleet stop [NAME]` | Terminate all its shared windows and the processes in them; retain saved work |
 
 `create` remains an alias for `start`. Stop closes the session's shared windows
 so grouped viewer sessions cannot keep its agents running. It retires the
