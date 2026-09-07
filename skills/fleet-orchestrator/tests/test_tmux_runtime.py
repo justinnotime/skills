@@ -90,7 +90,7 @@ class TmuxRuntimeTest(unittest.TestCase):
     def test_pane_snapshot_uses_selected_session_despite_grouped_viewers(self):
         def observe(command, **kwargs):
             scope = command[command.index("list-panes") + 1:command.index("-F")]
-            self.assertEqual(scope, ["-s", "-t", "=alpha"])
+            self.assertEqual(scope, ["-s", "-t", "=alpha:"])
             # tmux can report a grouped viewer as session_name even when the
             # target is the primary session. Honor the requested format here.
             values = {
@@ -119,6 +119,11 @@ class TmuxRuntimeTest(unittest.TestCase):
         self.assertEqual(command[command.index("list-panes") + 1:command.index("-F")], ["-a"])
         self.assertIn("#{session_name}", command[-1])
         self.assertEqual(pane["location"], "beta:2.0")
+
+    def test_numeric_session_has_distinct_pane_and_window_targets(self):
+        with mock.patch.dict(os.environ, {"NW_FLEET_PRIMARY_SESSION": "0"}):
+            self.assertEqual(tmux_runtime.pane_scope(), ["-s", "-t", "=0:"])
+            self.assertEqual(tmux_runtime.window_scope(), ["-t", "=0"])
 
     def test_invalid_selector_fails_closed(self):
         path = self.write_config("tmux37 -- bad")

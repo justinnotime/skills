@@ -230,6 +230,22 @@ class SessionFleetTest(unittest.TestCase):
         self.assertIn("outside the selected fleet session", result.stderr)
         self.tmux("has-session", "-t", "=beta")
 
+    def test_numeric_session_keeps_its_terminal_from_another_current_session(self):
+        self.native_session("0")
+        joined = self.bus("default", "join", "worker", "worker", "test", "pull",
+                          socket.gethostname().split('.')[0], "tmux=0:0.0 win=test",
+                          env=self.session_environment("0"))
+        identity = json.loads(joined.stdout)["agent_id"]
+        self.native_session("beta")
+        self.tmux("new-session", "-d", "-t", "0", "-s", "tview-test")
+        for env in (self.env, self.session_environment("beta")):
+            with self.subTest(inside_other_session="TMUX" in env):
+                members = [json.loads(line) for line in
+                           self.bus("default", "members", env=env).stdout.splitlines()]
+                member = next(row for row in members if row["agent_id"] == identity)
+                self.assertEqual(member["terminal_presence"], "present")
+                self.assertEqual(member["tmux"], "tmux=0:0.0")
+
     def test_stop_from_inside_its_own_window_finishes_the_whole_session(self):
         self.native_session("alpha")
         self.native_session("beta")

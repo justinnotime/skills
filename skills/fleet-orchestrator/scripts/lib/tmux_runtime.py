@@ -72,12 +72,14 @@ def pane_scope() -> list[str]:
         return ["-a"]
     if not SERVER_RE.fullmatch(session):
         raise TmuxRuntimeConfigError("invalid fleet primary session")
-    return ["-s", "-t", "=" + session]
+    # list-panes accepts a window target. The colon forces the session part;
+    # a bare numeric session can otherwise select a window in another fleet.
+    return ["-s", "-t", "=" + session + ":"]
 
 
 def window_scope() -> list[str]:
     scope = pane_scope()
-    return scope[1:] if scope[0] == "-s" else scope
+    return ["-t", scope[2][:-1]] if scope[0] == "-s" else scope
 
 
 def pane_snapshot() -> dict[str, dict[str, str | bool]]:
@@ -91,7 +93,7 @@ def pane_snapshot() -> dict[str, dict[str, str | bool]]:
         scope = pane_scope()
         # Grouped viewers can change session_name even for an exact target.
         # The selected session already defines the location of these panes.
-        session = scope[2][1:] if scope[0] == "-s" else "#{session_name}"
+        session = scope[2][1:-1] if scope[0] == "-s" else "#{session_name}"
         fields = (
             "#{socket_path}", "#{pid}", "#{start_time}", "#{pane_id}",
             session + ":#{window_index}.#{pane_index}", "#{pane_dead}",
