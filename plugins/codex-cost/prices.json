@@ -1,0 +1,519 @@
+{
+  "source": "https://developers.openai.com/api/docs/pricing",
+  "retrieved_at": "2026-09-08T15:08:45.321223+00:00",
+  "long_context_threshold": 272000,
+  "models": {
+    "gpt-6-astra": {
+      "standard": {
+        "short": [
+          10.0,
+          1.0,
+          12.5,
+          50.0
+        ],
+        "long": [
+          20.0,
+          2.0,
+          25.0,
+          75.0
+        ]
+      },
+      "fast": {
+        "short": [
+          20.0,
+          2.0,
+          25.0,
+          100.0
+        ],
+        "long": [
+          40.0,
+          4.0,
+          50.0,
+          150.0
+        ]
+      }
+    },
+    "gpt-5.6-sol": {
+      "standard": {
+        "short": [
+          4.0,
+          0.4,
+          5.0,
+          20.0
+        ],
+        "long": [
+          8.0,
+          0.8,
+          10.0,
+          30.0
+        ]
+      },
+      "fast": {
+        "short": [
+          8.0,
+          0.8,
+          10.0,
+          40.0
+        ],
+        "long": [
+          16.0,
+          1.6,
+          20.0,
+          60.0
+        ]
+      }
+    },
+    "gpt-5.6-terra": {
+      "standard": {
+        "short": [
+          2.0,
+          0.2,
+          2.5,
+          12.0
+        ],
+        "long": [
+          4.0,
+          0.4,
+          5.0,
+          18.0
+        ]
+      },
+      "fast": {
+        "short": [
+          4.0,
+          0.4,
+          5.0,
+          24.0
+        ],
+        "long": [
+          8.0,
+          0.8,
+          10.0,
+          36.0
+        ]
+      }
+    },
+    "gpt-5.6-luna": {
+      "standard": {
+        "short": [
+          0.2,
+          0.02,
+          0.25,
+          1.2
+        ],
+        "long": [
+          0.4,
+          0.04,
+          0.5,
+          1.8
+        ]
+      },
+      "fast": {
+        "short": [
+          0.4,
+          0.04,
+          0.5,
+          2.4
+        ],
+        "long": [
+          0.8,
+          0.08,
+          1.0,
+          3.6
+        ]
+      }
+    },
+    "gpt-5.5": {
+      "standard": {
+        "short": [
+          5.0,
+          0.5,
+          null,
+          30.0
+        ],
+        "long": [
+          10.0,
+          1.0,
+          null,
+          45.0
+        ]
+      },
+      "fast": {
+        "short": [
+          12.5,
+          1.25,
+          null,
+          75.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5.4": {
+      "standard": {
+        "short": [
+          2.5,
+          0.25,
+          null,
+          15.0
+        ],
+        "long": [
+          5.0,
+          0.5,
+          null,
+          22.5
+        ]
+      },
+      "fast": {
+        "short": [
+          5.0,
+          0.5,
+          null,
+          30.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5.4-mini": {
+      "standard": {
+        "short": [
+          0.75,
+          0.075,
+          null,
+          4.5
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          1.5,
+          0.15,
+          null,
+          9.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5.4-nano": {
+      "standard": {
+        "short": [
+          0.2,
+          0.02,
+          null,
+          1.25
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5.2": {
+      "standard": {
+        "short": [
+          1.75,
+          0.175,
+          null,
+          14.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          3.5,
+          0.35,
+          null,
+          28.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5.1": {
+      "standard": {
+        "short": [
+          1.25,
+          0.125,
+          null,
+          10.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          2.5,
+          0.25,
+          null,
+          20.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5": {
+      "standard": {
+        "short": [
+          1.25,
+          0.125,
+          null,
+          10.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          2.5,
+          0.25,
+          null,
+          20.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5-mini": {
+      "standard": {
+        "short": [
+          0.25,
+          0.025,
+          null,
+          2.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          0.45,
+          0.045,
+          null,
+          3.6
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-5-nano": {
+      "standard": {
+        "short": [
+          0.05,
+          0.005,
+          null,
+          0.4
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-4.1": {
+      "standard": {
+        "short": [
+          2.0,
+          0.5,
+          null,
+          8.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          3.5,
+          0.875,
+          null,
+          14.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-4.1-mini": {
+      "standard": {
+        "short": [
+          0.4,
+          0.1,
+          null,
+          1.6
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          0.7,
+          0.175,
+          null,
+          2.8
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-4.1-nano": {
+      "standard": {
+        "short": [
+          0.1,
+          0.025,
+          null,
+          0.4
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          0.2,
+          0.05,
+          null,
+          0.8
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-4o": {
+      "standard": {
+        "short": [
+          2.5,
+          1.25,
+          null,
+          10.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          4.25,
+          2.125,
+          null,
+          17.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "gpt-4o-mini": {
+      "standard": {
+        "short": [
+          0.15,
+          0.075,
+          null,
+          0.6
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "fast": {
+        "short": [
+          0.25,
+          0.125,
+          null,
+          1.0
+        ],
+        "long": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    }
+  }
+}

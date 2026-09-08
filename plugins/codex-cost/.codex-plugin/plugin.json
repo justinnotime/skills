@@ -1,0 +1,19 @@
+{
+  "name": "codex-cost",
+  "version": "0.1.0+codex.20260908235417",
+  "description": "Per-conversation API cost estimates and cache statistics, shown at the end of each Codex turn.",
+  "author": {
+    "name": "justinnotime"
+  },
+  "interface": {
+    "displayName": "Codex Cost",
+    "shortDescription": "Track turn cost, total cost and cache hits.",
+    "longDescription": "Per-conversation API cost estimates and cache statistics, shown at the end of each Codex turn.",
+    "developerName": "justinnotime",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use Codex Cost."
+  },
+  "repository": "https://github.com/justinnotime/skills",
+  "license": "MIT"
+}

@@ -6,6 +6,31 @@ permissions:
   contents: read
 
 jobs:
+  codex-cost:
+    name: codex-cost / Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.30"
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - name: Test isolated plugin
+        env:
+          TEST_PYTHON: ${{ matrix.python }}
+        run: |
+          cp -a "$GITHUB_WORKSPACE/plugins/codex-cost" "$RUNNER_TEMP/codex-cost"
+          cd "$RUNNER_TEMP/codex-cost"
+          uv run --no-project --python "$TEST_PYTHON" python -B -m unittest discover -s tests -v
   skill:
     name: ${{ matrix.skill }} / ${{ matrix.check }}
     runs-on: ubuntu-24.04
