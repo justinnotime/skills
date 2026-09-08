@@ -19,6 +19,15 @@ Use `scripts/orc` from this package, or the installed `orc` command. A leading
 same file can be selected through `FLEET_ORCHESTRATOR_CONFIG`. Without one, the
 runtime uses local state under XDG directories and a local message transport.
 
+Start with `orc` for all fleets or `orc fleet NAME` for one fleet's goals and
+current work. Within a fleet, use `board`, `goals`, `task`, `agents`, `review`
+and `view [WINDOW]`; maintenance is under `admin`. `orc -t NAME` is the short
+fleet selector. Board supports `--view table|columns|summary` and `--json` from
+the same read-only work selection. Goal history requires `goals --all` or an
+explicit goal ID. `orc fleet NAME view WINDOW` enters the same windows as
+`tview -t NAME:WINDOW`. Help presents this hierarchy; older spellings remain
+compatible forwards. Neither listing nor viewing saved work creates databases.
+
 Read `FLEET_ORCHESTRATOR_PROFILE`, or
 `${XDG_CONFIG_HOME:-$HOME/.config}/fleet-orchestrator/profile.md`, when present,
 for the caller's workflow and authority rules. Missing personal preferences do
@@ -40,16 +49,15 @@ Listing and entering do not start offline fleets.
 
 Ordinary local fleets are the live tmux session groups on the configured server;
 their names select separate task and message stores without a fleet profile.
-No separate `tmux new-session` step is required: `orc fleet start NAME` creates
-or reuses the named tmux session. `orc fleet window [NAME]` adds a window, and
-`orc fleet stop [NAME]` terminates its windows and agents,
-including grouped viewer sessions, while retaining saved work. Omitted names
-use the current session. Native tmux sessions are discovered automatically.
+No separate `tmux new-session` step is required: `orc fleet NAME start` creates
+or reuses the named tmux session. `orc fleet NAME window` adds a window, and
+`orc fleet NAME stop` terminates its windows and agents,
+including grouped viewer sessions, while retaining saved work. For the current session, `orc window` and `orc stop` omit the selector. Native tmux sessions are discovered automatically.
 `tview --fleet NAME` opens a view of the same windows; its grouped viewer
 sessions do not duplicate agents or create another fleet. Creating terminals
 and starting/registering agents are separate operations; follow normal
 [agent onboarding](references/agent-bus.md#join-the-current-session).
-`orc fleet rename OLD NEW` preserves processes and saved work without moving
+`orc fleet OLD rename NEW` preserves processes and saved work without moving
 open databases. A raw tmux rename changes the live display name; use the ORC
 rename command to retain a new history name after the session ends.
 Follow any caller-owned handoff requirements before an authorized stop.
@@ -63,7 +71,7 @@ registration-time window number, and does not prove model responsiveness.
 Bare commands inside tmux follow its actual session. An explicit fleet applies
 to that command and its descendants, not later unrelated commands.
 
-Use one caller-configured `orc fleet tick` schedule for the default fleet and
+Use one caller-configured `orc admin tick` schedule for the default fleet and
 live local fleets with saved task databases. It discovers groups each time,
 uses existing per-store engine locks and isolates failures. Local fleets do not
 inherit the default fleet's global project import or repository patrol. Starting

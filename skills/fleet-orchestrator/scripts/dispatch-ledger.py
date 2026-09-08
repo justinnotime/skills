@@ -304,6 +304,10 @@ def print_row(row: sqlite3.Row, verbose: bool = False) -> None:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
+    if not wp.configured_db_path().exists():
+        if not args.json:
+            print("OK    no matching dispatches")
+        return 0
     conn = connect_readonly()
     where, params = [], []
     if not args.all:
@@ -632,7 +636,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
             print(f"Task {row['id']} has a completion claim but no independent"
                   f" recorded reviewer: {row['subject']}")
             print((claim["payload"] or "(no completion detail stored)").strip())
-            print(f"Inspect with `orc show {row['id']}`; close it to accept,"
+            print(f"Inspect with `{wp.orc_task_command(row['id'])}`; close it to accept,"
                   f" or chase it to return the work.")
         if unrouted_action:
             obligation = wp.continuation_obligation(conn, row)
@@ -640,7 +644,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
                       else "inspect the current task")
             print(f"Task {row['id']} has no verified recipient for its next"
                   f" action: {action}.\n{row['subject']}"
-                  f"\nInspect with `orc show {row['id']}` and assign the"
+                  f"\nInspect with `{wp.orc_task_command(row['id'])}` and assign the"
                   " action to an active seat, or handle it directly.")
         if idle_escalation:
             idle_event = conn.execute(

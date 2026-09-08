@@ -180,7 +180,7 @@ if [ "${AGENT_BUS_FORCE_NEW:-0}" != "1" ]; then
       say "NOTE this tmux pane already has an active bus seat: $c_handle"
       say "  attempting sanctioned succession (fail-closes on obligations or"
       say "  signs of life; retires only a provably absent predecessor):"
-      if [ -n "${TMUX_PANE:-}" ] && "$HERE/orc" pane-succession --pane "$TMUX_PANE" --location "$tmux_location"; then
+      if [ -n "${TMUX_PANE:-}" ] && "$HERE/orc" agent pane-succession --pane "$TMUX_PANE" --location "$tmux_location"; then
         say "  pane clear — continuing onboarding."
         guard_rc=0
       else
@@ -228,7 +228,7 @@ say "-- your reliable inbox (10 messages / 32 KiB max; remainder stays durable):
 bash "$BUS" pull "$AGENT_ID"
 say ""
 say "-- your work state (orchestrator, read-only):"
-if ! timeout 30 "$HERE/orc" onboard "$AGENT_ID" 2>/dev/null; then
+if ! timeout 30 "$HERE/orc" agent onboard "$AGENT_ID" 2>/dev/null; then
   say "  (orchestrator unavailable — check manually: $HERE/orc board)"
 fi
 cat <<EOF
@@ -247,6 +247,6 @@ Next steps:
 
 Read the inbox with: bash $BUS pull $AGENT_ID
 Inspect without consuming with: bash $BUS unread $AGENT_ID
-Leave through: $HERE/orc checkout --summary "<your handoff summary>"
+Leave through: $HERE/orc agent checkout --summary "<your handoff summary>"
 Full protocol: $README
 EOF

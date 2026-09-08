@@ -22,7 +22,10 @@ class OrcTmuxObservationTest(unittest.TestCase):
         base = Path(self.tmp.name)
         self.runtime = base / "runtime"
         self.env = dict(os.environ)
+        config = base / "config.json"
+        config.write_text("{}")
         self.env.update({
+            "FLEET_ORCHESTRATOR_CONFIG": str(config),
             "DISPATCH_LEDGER_DB": str(base / "ledger.sqlite3"),
             "NOTES_RUNTIME_DIR": str(self.runtime),
             "MATRIX_BUS_CFG": str(base / "bus"),

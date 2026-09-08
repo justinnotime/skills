@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code statusline command: claude-hud's own line(s) first, then the
-# fleet work-graph digest (`orc statusline`). Configure in
+# fleet work-graph digest (`orc board --view summary`). Configure in
 # ~/.claude/settings.json as statusLine.command, with refreshInterval so the
 # digest stays current while a session idles.
 #
@@ -35,9 +35,9 @@ fi
 orc_bin=${NW_ORC_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orc}
 if [ -x "$orc_bin" ]; then
     if [ "${NW_ORC_STATUSLINE_FULL:-0}" = "1" ]; then
-        timeout 5 "$orc_bin" kanban --max-rows "${NW_ORC_STATUSLINE_ROWS:-3}" 2>/dev/null || true
+        timeout 5 "$orc_bin" board --view columns --max-rows "${NW_ORC_STATUSLINE_ROWS:-3}" 2>/dev/null || true
     else
-        timeout 5 "$orc_bin" statusline 2>/dev/null || true
+        timeout 5 "$orc_bin" board --view summary 2>/dev/null || true
     fi
 fi
 exit 0

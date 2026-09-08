@@ -97,7 +97,7 @@ present it through `pull`, handle it, then acknowledge it. Neither `unread` nor
 
 ## Leave the session
 
-`scripts/orc checkout --summary "<handoff>"` checks outstanding work and roles,
+`scripts/orc agent checkout --summary "<handoff>"` checks outstanding work and roles,
 uses the configured handoff publication command, and retires the selected
 identity only after successful publication. Without a publication command,
 it writes the handoff to the configured local directory. `--no-vault-note` skips the handoff

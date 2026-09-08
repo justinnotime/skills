@@ -19,10 +19,13 @@ chmod +x "$TMP/bin/python3"
 export PATH="$TMP/bin:$PATH"
 export TEST_BUS_CFG="$TMP/config"
 
+# This test checks bus verb dispatch after fleet resolution. The Python stub
+# deliberately cannot run the selector; real selection is covered by the
+# session-fleet integration tests.
 check() {
   expected="$1"
   shift
-  actual=$(bash "$ROOT/scripts/matrix-bus.sh" "$@")
+  actual=$(bash "$ROOT/scripts/matrix-bus.sh" --resolved "$@")
   case "$actual" in
     *"agent-bus-v3.py $expected"*) ;;
     *) printf 'expected %s dispatch, got: %s\n' "$expected" "$actual" >&2; exit 1 ;;
@@ -42,7 +45,7 @@ check delivery delivery a m
 check retry retry a
 check retire retire a
 
-AGENT_BUS_TRANSPORT=local bash "$ROOT/scripts/matrix-bus.sh" setup host/test >/dev/null
+AGENT_BUS_TRANSPORT=local bash "$ROOT/scripts/matrix-bus.sh" --resolved setup host/test >/dev/null
 [[ -d "$TEST_BUS_CFG" ]] || { echo "local setup did not create config directory" >&2; exit 1; }
 
 echo "agent-bus simple CLI dispatch passed"
@@ -55,4 +58,4 @@ cat > "$TMP/tmux-bin/tmux" <<'EOF'
 printf '%s\n' "$$ 0:4.0 opencode" "999999 0:8.0 codex"
 EOF
 chmod +x "$TMP/tmux-bin/tmux"
-PATH="$TMP/tmux-bin:$PATH" bash "$ROOT/scripts/matrix-bus.sh" tmux-id >/dev/null
+PATH="$TMP/tmux-bin:$PATH" bash "$ROOT/scripts/matrix-bus.sh" --resolved tmux-id >/dev/null

@@ -1117,7 +1117,7 @@ def _configured_names(env: Mapping[str, str]) -> list[str]:
         raise FleetProfileError("fleet profiles could not be listed") from exc
     primary = cfg.get("tmux.primary_session", "0", env=_default_environment(env))
     try:
-        discovered = local_sessions(env)
+        discovered = local_session_details(env)
     except FleetProfileError:
         # The default-server row still reports the failed observation. Keep
         # independently configured fleets inspectable when that server fails.
@@ -1125,6 +1125,34 @@ def _configured_names(env: Mapping[str, str]) -> list[str]:
     names.extend(name for name in discovered
                  if name != primary and name not in names
                  and name != default_name(env))
+    # Saved work survives its terminal. Derive it from the existing runtime
+    # directories, deduplicating rename aliases; no second fleet registry.
+    root = runtime_root(_default_environment(env))
+    saved = sorted(root.iterdir()) if root.exists() else []
+    represented = set()
+    for name, details in discovered.items():
+        try:
+            represented.add(local_runtime(name, details, env))
+        except FleetProfileError:
+            pass  # The existing fleet row reports its invalid selection.
+
+    # Prefer the newest durable rename alias when only saved history remains.
+    for path in sorted(saved, key=lambda path: (not path.is_symlink(), -path.lstat().st_mtime_ns, path.name)):
+        if (path.name in names or path.name in {"default", default_name(env), primary}
+                or not NAME_RE.fullmatch(path.name) or path.name.startswith("tview-")):
+            continue
+        try:
+            runtime = local_runtime(path.name, None, env)
+        except FleetProfileError:
+            continue
+        if runtime in represented or not runtime.is_dir():
+            continue
+        if not any((runtime / suffix).is_file() for suffix in (
+                "state/fleet-orchestrator/dispatch-ledger.sqlite3",
+                "state/agent-bus/agent-bus-v3.sqlite3")):
+            continue
+        names.append(path.name)
+        represented.add(runtime)
     return names
 
 

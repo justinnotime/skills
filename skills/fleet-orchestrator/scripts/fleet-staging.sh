@@ -179,13 +179,13 @@ cmd_e2e() {
   tick
   sleep 3
   grep -qF "ORC reminder:" "$LOG1" || fail "continuation reminder did not arrive at the fake pane"
-  grep -qF "orc show $node1" "$LOG1" || fail "continuation reminder did not name the owed task and inspection command"
-  grep -qF "orc show $node2" "$LOG1" || fail "one reminder did not cover the second task on the same seat"
+  grep -qF "task show $node1" "$LOG1" || fail "continuation reminder did not name the owed task and inspection command"
+  grep -qF "task show $node2" "$LOG1" || fail "one reminder did not cover the second task on the same seat"
   [ "$(grep -cF 'ORC reminder:' "$LOG1")" -eq 1 ] || fail "continuation reminder fired more than once in one tick"
   peer_submissions="$(grep -cF '[agent-tmux-send from ' "$LOG1" || true)"
   [ "$peer_submissions" -eq 1 ] || fail "expected one peer-message submission, recorded $peer_submissions"
-  [ "$(grep -cF "orc show $node1" "$LOG1")" -eq 1 ] || fail "first task appeared more than once in the reminder"
-  [ "$(grep -cF "orc show $node2" "$LOG1")" -eq 1 ] || fail "second task appeared more than once in the reminder"
+  [ "$(grep -cF "task show $node1" "$LOG1")" -eq 1 ] || fail "first task appeared more than once in the reminder"
+  [ "$(grep -cF "task show $node2" "$LOG1")" -eq 1 ] || fail "second task appeared more than once in the reminder"
   if grep -q "批准" "$LOG1"; then fail "authorize fired without ask-evidence"; fi
   python3 "$LEDGER" close "$node2" --resolution done --note "coalescing assertion complete" >/dev/null
 
