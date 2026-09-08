@@ -45,6 +45,7 @@ reusing that name removes the redirect.
 | Path | Purpose |
 |---|---|
 | `skills/` | Installable deterministic behavior packages |
+| `plugins/codex-cost/` | Codex hook plugin for per-turn cost, conversation totals and cache statistics |
 | `skills/state-backup/` | State-backup Skill and canonical backup script |
 | `backup.sh` | Stable compatibility link retained for existing jobs and links |
 | `skills/syncthing-doctor/` | Syncthing diagnostic Skill and canonical doctor script |
@@ -90,6 +91,24 @@ reusing that name removes the redirect.
 The three root shell paths are relative symbolic links into their Skill
 packages. This keeps existing scheduler and shell configuration working while
 making each implementation part of its behavior package.
+
+## Codex cost plugin
+
+[Codex Cost](plugins/codex-cost/README.md) displays API cost estimates and cache
+statistics after each Codex turn. It uses local usage records and makes no model
+or network calls. Install it with:
+
+```bash
+codex plugin marketplace add justinnotime/skills
+codex plugin add codex-cost@skills
+```
+
+The plugin needs Python 3.11 or newer. Its source, pricing snapshot and synthetic
+tests are contained in `plugins/codex-cost/`. Reproduce its checks with:
+
+```bash
+(cd plugins/codex-cost && python3 -B -m unittest discover -s tests -v)
+```
 
 ## Backup layout
 
