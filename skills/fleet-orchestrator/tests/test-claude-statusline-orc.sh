@@ -15,7 +15,7 @@ echo "HUDLINE"
 EOF
 cat > "$tmp/orc" <<'EOF'
 #!/usr/bin/env bash
-[ "${1:-}" = statusline ] && echo "ORCLINE"
+[ "$*" = "board --view summary" ] && echo "ORCLINE"
 EOF
 cat > "$tmp/hud-broken" <<'EOF'
 #!/usr/bin/env bash
@@ -44,16 +44,16 @@ echo "OK   hud line survives a missing orc, exit stayed 0"
 
 cat > "$tmp/orc-echo" <<'EOF'
 #!/usr/bin/env bash
-echo "VERB:$1"
+echo "VERB:$*"
 EOF
 chmod +x "$tmp/orc-echo"
 out=$(echo '{}' | NW_HUD_CMD="$tmp/hud" NW_ORC_BIN="$tmp/orc-echo" bash "$WRAPPER")
-printf '%s\n' "$out" | grep -q "VERB:statusline" || {
-    echo "FAIL default mode must call the statusline verb"; exit 1; }
+printf '%s\n' "$out" | grep -q "VERB:board --view summary" || {
+    echo "FAIL default mode must call the summary view"; exit 1; }
 out=$(echo '{}' | NW_HUD_CMD="$tmp/hud" NW_ORC_BIN="$tmp/orc-echo" \
     NW_ORC_STATUSLINE_FULL=1 bash "$WRAPPER")
-printf '%s\n' "$out" | grep -q "VERB:kanban" || {
-    echo "FAIL NW_ORC_STATUSLINE_FULL=1 must call the kanban verb"; exit 1; }
-echo "OK   NW_ORC_STATUSLINE_FULL switches the verb"
+printf '%s\n' "$out" | grep -q "VERB:board --view columns" || {
+    echo "FAIL NW_ORC_STATUSLINE_FULL=1 must call the columns view"; exit 1; }
+echo "OK   NW_ORC_STATUSLINE_FULL switches the view"
 
 echo "OK   statusline wrapper contract holds"

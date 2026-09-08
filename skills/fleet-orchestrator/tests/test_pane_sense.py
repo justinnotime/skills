@@ -95,8 +95,11 @@ class NamedServerSelectionTests(unittest.TestCase):
             cfg = root / "state" / "fleet-orchestrator" / "tmux-server"
             cfg.parent.mkdir(parents=True)
             cfg.write_text("tmux37\n")
+            config = root / "config.json"
+            config.write_text("{}")
             with mock.patch.dict(
-                    os.environ, {"NOTES_RUNTIME_DIR": tmp}, clear=False):
+                    os.environ, {"NOTES_RUNTIME_DIR": tmp,
+                                 "FLEET_ORCHESTRATOR_CONFIG": str(config)}, clear=False):
                 os.environ.pop("NW_TMUX_SERVER", None)
                 self.assertEqual(TMUX_SEND.tmux_base_cmd(),
                                  ["tmux", "-L", "tmux37"])

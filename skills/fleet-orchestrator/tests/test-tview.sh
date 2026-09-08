@@ -296,6 +296,8 @@ check_entry numeric-session 0 2 "$TVIEW" -t 0:2
 check_entry default-alias 0 2 "$TVIEW" -t primary:two
 check_entry orc-target alternate 5 "$stage/orc" tview -t alternate:5
 check_entry orc-fleet alternate 5 "$stage/orc" --fleet alternate tview -w 5
+check_entry orc-workgroup alternate 5 "$stage/orc" fleet alternate view 5
+check_entry orc-short-workgroup alternate 5 "$stage/orc" -t alternate view 5
 check_entry orc-long alternate 5 "$stage/orc" tview --fleet alternate --window 5
 
 # An inherited TMUX/TMUX_PANE pair that the minting server no longer owns (a

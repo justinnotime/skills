@@ -80,8 +80,8 @@ def _open(args: argparse.Namespace) -> str:
             and args.to != args.owner):
         raise SystemExit(
             "FAIL  a combined PR dispatch must send directly to its owner:"
-            " --to and --owner must be identical. Use `orc open` when the"
-            " owner learned the task out of band, and `orc announce --to`"
+            " --to and --owner must be identical. Use `orc task open` when the"
+            " owner learned the task out of band, and `orc task announce --to`"
             " for any separate informational notice."
         )
     if workflow == "pr" and not getattr(args, "deadline", None):
@@ -191,7 +191,7 @@ def dispatch_message(row: sqlite3.Row) -> tuple[str, str]:
     body = row["body"] or row["subject"]
     return (f"dispatch {row['id']}: {row['subject']}"[:180],
             f"{body}\n\nTask {row['id']} in the fleet work graph; "
-            f"ack with: dispatch-ledger.py ack {row['id']}")
+            f"ack with: {wp.orc_task_command(row['id'], 'ack')}")
 
 
 def send_dispatch_message(conn, row: sqlite3.Row) -> bool:
@@ -483,7 +483,7 @@ def cmd_verdict(args: argparse.Namespace) -> int:
                  "Review verdict clean. "
                  + cfg.get("authority.receipt_instructions",
                            "Post the review evidence required by your project policy:")
-                 + f" fleet-orchestrator.py receipt {row['id']} --body-file <f>",
+                 + f" {wp.orc_command('review', 'receipt', row['id'])} --body-file <f>",
                  row["parent_id"], expected_responsibility_version=
                  row["responsibility_version"])
     print(f"OK    {row['id']} verdict {args.verdict} -> {new_state}")
@@ -601,7 +601,7 @@ def cmd_reassign(args: argparse.Namespace) -> int:
             if val.strip().lower() in {"all", "@all"}:
                 raise SystemExit(
                     f"FAIL  {field} cannot be all/@all: task responsibility"
-                    " needs exactly one seat; use `orc announce` for"
+                    " needs exactly one seat; use `orc task announce` for"
                     " broadcasts"
                 )
             if val == row[col]:
@@ -685,8 +685,7 @@ def cmd_reassign(args: argparse.Namespace) -> int:
                 f"review-req:{row['id']}:reassign{n_re}", owed,
                 f"review request (reassigned to you): {row['subject']}"[:180],
                 f"Task {row['id']} reassigned to you as reviewer."
-                f" Record your verdict: fleet-orchestrator.py verdict"
-                f" {row['id']} blockers|clean --note"
+                f" Record your verdict: {wp.orc_command('review', 'verdict', row['id'])} blockers|clean --note"
                 f" '<findings or PR-review link>'", row["parent_id"],
                 expected_responsibility_version=
                 row["responsibility_version"])
@@ -1726,72 +1725,171 @@ def frontier_tasks(conn, rows) -> list[sqlite3.Row]:
     return out
 
 
-def cmd_board(args: argparse.Namespace) -> int:
-    if (os.environ.get("NW_FLEET_PRIMARY_SESSION")
-            and not wp.configured_db_path().exists()):
-        print("OK    board empty; this session has no recorded tasks")
-        return 0
+def fleet_label() -> dict:
+    name = os.environ.get("NW_FLEET") or cfg.get("fleets.default_name", "default")
+    if name == "default":
+        name = cfg.get("fleets.default_name", "default")
+    return {"name": name, "session": os.environ.get("NW_FLEET_PRIMARY_SESSION")
+            or cfg.get("tmux.primary_session", "0")}
+
+
+def fleet_heading() -> str:
+    fleet = fleet_label()
+    return f"Fleet {fleet['name']} | session {fleet['session']}"
+
+
+def board_data(repo=None) -> dict:
+    """One read-only work selection for table, columns, summary and JSON."""
+    data = {"fleet": fleet_label(), "tasks": [], "goals": [], "recently_closed": [],
+            "counts": {"tasks": 0, "goals": 0, "operator": 0, "attention": 0},
+            "warnings": [], "scheduler": tick_staleness()}
+    if not wp.configured_db_path().exists():
+        data["scheduler"] = None
+        return data
     conn = wp.connect_readonly()
-    if not wp.members_available(conn):
-        print("WARN  Agent Bus registry unavailable; current recipients are unknown")
-    rows = open_tasks(conn)
-    if args.repo:
-        rows = [r for r in rows
-                if wp.bare_repo(r["repo"]) == wp.bare_repo(args.repo)]
-    operator_rows = [r for r in rows if wp.waits_on_operator(conn, r)]
-    operator_ids = {r["id"] for r in operator_rows}
-    other = [r for r in rows if r["id"] not in operator_ids]
-    print(f"=== fleet board: {len(rows)} open task(s) ===")
-    if operator_rows:
-        print(f"--- AWAITING OPERATOR ({len(operator_rows)}) - his queryable pipeline,"
-              f" full bodies via `brief`")
-        for r in operator_rows:
-            flags = " ".join(task_flags(conn, r))
-            suffix = f"  {flags}" if flags else ""
-            print(f"  {r['id']}  open {wp.human_age(wp.now() - r['created_ms']):<5}"
-                  f" {r['subject'][:80]}{suffix}")
-    if other:
-        print(f"--- IN FLIGHT ({len(other)})")
-        for r in other:
-            if r["state"] == wp.WAITING_STATE:
+    try:
+        if not wp.members_available(conn):
+            data["warnings"].append("Agent Bus registry unavailable; current recipients are unknown")
+        rows = open_tasks(conn)
+        if repo:
+            rows = [r for r in rows if wp.bare_repo(r["repo"]) == wp.bare_repo(repo)]
+        attention = {row["id"]: reason for row, reason in attention_rows(conn, rows)}
+        frontier = {row["id"] for row in frontier_tasks(conn, rows)}
+        for row in rows:
+            item = dict(row)
+            waiting = row["state"] == wp.WAITING_STATE
+            context = None if waiting else wp.continuation_context(conn, row)
+            blockers = [r["id"] for r in wp.open_predecessors(conn, row["id"])]
+            owner = ("nobody" if context is None else
+                     f"unresolved:{context['requested']}" if context.get("deferred")
+                     else context["seat"])
+            item.update(owner=owner,
+                        next_action=("waits on " + ", ".join(blockers) if waiting else
+                                     context["label"] if context else ""),
+                        blockers=blockers, column=wp.kanban_column(row),
+                        operator=wp.waits_on_operator(conn, row),
+                        attention=attention.get(row["id"]),
+                        flags=task_flags(conn, row), frontier=row["id"] in frontier)
+            data["tasks"].append(item)
+            if wp.row_workflow(row) == "parent":
+                item["children_summary"] = children_breakdown(conn, row["id"])
+                data["goals"].append(item)
+        closed = conn.execute("SELECT * FROM dispatch WHERE state='closed' AND"
+                              " last_event >= ? ORDER BY last_event DESC",
+                              (wp.now() - 86400,)).fetchall()
+        data["recently_closed"] = [dict(r) for r in closed
+                                  if not repo or wp.bare_repo(r["repo"]) == wp.bare_repo(repo)]
+        data["counts"] = {"tasks": len(rows), "goals": len(data["goals"]),
+                          "operator": sum(t["operator"] for t in data["tasks"]),
+                          "attention": len(attention)}
+        return data
+    finally:
+        conn.close()
 
 
-                blockers = ",".join(p["id"] for p in
-                                    wp.open_predecessors(conn, r["id"]))
-                owed = f"nobody, waits on {blockers or 'a missing predecessor'}"
-                action = ""
-            else:
-                context = wp.continuation_context(conn, r)
-                if context is None:
-                    owed, action = "nobody", ""
-                elif context.get("deferred"):
-                    owed = f"unresolved:{context['requested']}"
-                    action = context["label"]
-                else:
-                    owed = context["seat"]
-                    action = context["label"]
-            quiet = wp.human_age(wp.now() - r["last_event"])
-            flags = " ".join(task_flags(conn, r))
-            print(f"  {r['id']}  [{wp.row_workflow(r):<8}] {r['state']:<15} owes={owed:<30}"
-                  f" quiet={quiet:<5} {flags}  {action}: {r['subject'][:48]}")
-    frontier = frontier_tasks(conn, rows)
-    if frontier:
-        print(f"--- FRONTIER ({len(frontier)}) - dependency-graph work that is"
-              f" actionable now: nothing it waits on is still open")
-        for r in frontier:
-            behind = len(wp.needs_ids(conn, r["id"]))
-            unblocks = len(wp.needed_by_ids(conn, r["id"]))
-            context = wp.continuation_context(conn, r)
-            owed = context["seat"] if context is not None else "nobody"
-            print(f"  {r['id']}  [{wp.row_workflow(r):<8}] {r['state']:<15}"
-                  f" owes={owed:<30} after={behind} closed,"
-                  f" unblocks={unblocks}  {r['subject'][:44]}")
-    if not rows:
-        print("OK    board empty")
-    stale = tick_staleness()
-    if stale:
-        print(f"WARN  {stale}")
+def task_notices(flags):
+    messages = {"ASKING": "Needs a decision", "GUARD-UNKNOWN": "Progress check unavailable",
+                "DEADLINE-OVERDUE": "Deadline passed", "CLAIMS-DONE": "Completion claimed; awaiting review",
+                "REVIEWING": "Review in progress", "SUPERVISOR-UNREACHABLE": "Coordinator could not be reached",
+                "REVIEWER-POOL-UNAVAILABLE": "No reviewer is available", "SEND-FAILED": "Message delivery pending",
+                "INVALID-TARGET": "Recipient could not be resolved", "RECIPIENT-UNKNOWN": "Recipient identity is unknown"}
+    return [message for prefix, message in messages.items() if any(flag.startswith(prefix) for flag in flags)]
+
+
+def render_board(data, *, overview=False):
+    print(f"{fleet_heading()} | {data['counts']['tasks']} open task(s)")
+    if overview or data["goals"]:
+        print("GOALS")
+        for goal in data["goals"]:
+            print(f"  {goal['id']}  {goal['subject']} [{goal['children_summary']}]")
+        if not data["goals"]:
+            print("  No active goals. Use goals --all to inspect history.")
+    for label, tasks in (
+        ("NEEDS YOU", [t for t in data["tasks"] if t["operator"]]),
+        ("IN PROGRESS", [t for t in data["tasks"] if not t["operator"]]),
+    ):
+        if not tasks:
+            continue
+        print(label)
+        for task in tasks:
+            print(f"  {task['id']}  {task['subject']}")
+            ready = " | ready now" if task["frontier"] else ""
+            print(f"    owner: {task['owner']} | {task['state']} | {task['next_action']}{ready}")
+            notices = task_notices(task["flags"])
+            if notices:
+                print("    " + "; ".join(notices))
+    if not data["tasks"]:
+        print("No open tasks.")
+    for warning in data["warnings"]:
+        print(f"WARN  {warning}")
+    if data["scheduler"]:
+        print(f"WARN  {data['scheduler']}")
+    if overview:
+        print("Views: board | goals | agents | task show ID | view [WINDOW]")
+
+
+def cmd_board(args: argparse.Namespace) -> int:
+    data = board_data(getattr(args, "repo", None))
+    if getattr(args, "json", False):
+        print(json.dumps(data, ensure_ascii=False))
+    elif getattr(args, "view", "table") == "summary":
+        render_summary(data, args)
+    elif getattr(args, "view", "table") == "columns":
+        render_columns(data, args)
+    else:
+        render_board(data)
     return 0
+
+
+def cmd_overview(args: argparse.Namespace) -> int:
+    data = board_data()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+    else:
+        render_board(data, overview=True)
+    return 0
+
+
+def cmd_agents(args: argparse.Namespace) -> int:
+    members = _bus_members()
+    warnings = []
+    if members is None:
+        warnings.append("Agent Bus registry unavailable; membership is unknown")
+    try:
+        windows = [{"index": index, "name": name} for index, name in pane_sense.window_titles()]
+    except (RuntimeError, OSError) as exc:
+        windows = None
+        warnings.append(f"Terminal windows unavailable: {exc}")
+    roles = {}
+    if wp.configured_db_path().exists():
+        conn = wp.connect_readonly()
+        try:
+            for row in conn.execute("SELECT role,agent_id FROM role_assignment WHERE revoked_ms IS NULL"):
+                roles.setdefault(row["agent_id"], []).append(row["role"])
+        finally:
+            conn.close()
+    active = [{**member, "roles": roles.get(member["agent_id"], [])}
+              for member in members or [] if member.get("status") == "active"]
+    data = {"fleet": fleet_label(), "agents": active if members is not None else None,
+            "windows": windows, "warnings": warnings}
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+    else:
+        print(fleet_heading())
+        print("WINDOWS")
+        for window in windows or []:
+            print(f"  {window['index']:>3}  {window['name']}")
+        print("AGENTS")
+        for member in active:
+            window = wp.window_from_tmux_field(member.get("tmux", "")) or "?"
+            print(f"  window {window}  {member.get('handle', member['agent_id'])}"
+                  f"  {member.get('harness', '?')} | terminal {member.get('terminal_presence', 'unknown')}"
+                  f"  {', '.join(member['roles'])}")
+        if members is not None and not active:
+            print("  No registered agents.")
+        for warning in warnings:
+            print(f"WARN  {warning}")
+    return int(members is None)
 
 
 def tick_staleness() -> str | None:
@@ -1865,146 +1963,113 @@ def attention_rows(conn, rows) -> list:
     return attn
 
 
-def summary_line(conn, rows, attn, paint) -> str:
-
-
-    stale = tick_staleness()
+def render_summary(data, args):
+    paint = make_paint(getattr(args, "no_color", False))
+    stale = data["scheduler"]
     if stale:
-        tick_part = paint("31", "tick STALE" if "not run for" in stale
-                          else "tick NEVER")
+        tick_part = paint("31", "tick STALE" if "not run for" in stale else "tick NEVER")
     else:
-        last = json.loads((state_dir() / "tick-last.json").read_text())["at_s"]
-        tick_part = f"tick {wp.human_age(wp.now() - int(last))}"
-    if not rows:
-        return f"ORC idle | {tick_part}"
-    counts = {}
-    for r in rows:
-        c = wp.kanban_column(r)
-        counts[c] = counts.get(c, 0) + 1
-    col_part = " ".join(f"{c} {counts[c]}" for c in wp.KANBAN_COLUMNS
-                        if counts.get(c))
-    attn_part = paint("31", f"attn {len(attn)}") if attn else "attn 0"
-    operator_n = sum(1 for r in rows if wp.waits_on_operator(conn, r))
-    op_part = paint("33", f"operator {operator_n}") if operator_n \
-        else "operator 0"
-    return " | ".join([f"ORC open {len(rows)}", col_part, attn_part,
-                       op_part, tick_part])
+        tick_part = "scheduler current" if wp.configured_db_path().exists() else "no recorded work"
+    tasks = data["tasks"]
+    prefix = f"{fleet_heading()} | ORC"
+    if not tasks:
+        print(f"{prefix} idle | {tick_part}")
+    else:
+        counts = {column: sum(t["column"] == column for t in tasks) for column in wp.KANBAN_COLUMNS}
+        columns = " ".join(f"{column} {count}" for column, count in counts.items() if count)
+        print(f"{prefix} open {len(tasks)} | {columns} | attn {data['counts']['attention']}"
+              f" | operator {data['counts']['operator']} | {tick_part}")
+        attention = [f"{t['id']} {t['attention']} {t['subject']}" for t in tasks if t["attention"]]
+        if attention:
+            width = max(int(os.environ.get("COLUMNS") or 200), 40)
+            print(paint("31", ("ATTN " + " | ".join(attention))[:width]))
+    for warning in data["warnings"]:
+        print(f"WARN  {warning}")
 
 
 def cmd_statusline(args: argparse.Namespace) -> int:
+    args.view = "summary"
+    return cmd_board(args)
 
 
-    conn = wp.connect_readonly()
-    rows = open_tasks(conn)
-    paint = make_paint(args.no_color)
-    attn = attention_rows(conn, rows)
-    print(summary_line(conn, rows, attn, paint))
-    if attn:
-        width = int(os.environ.get("COLUMNS") or 200)
-        items = [f"{r['id']} {reason} {wp.human_age(wp.now() - r['last_event'])}"
-                 f" {r['subject'][:32]}" for r, reason in attn]
-        line = "ATTN " + " | ".join(items)
-        print(paint("31", line[:max(width, 40)]))
-    return 0
+def render_columns(data, args):
+    render_summary(data, args)
+    paint = make_paint(getattr(args, "no_color", False))
+    cells = {column: [] for column in wp.KANBAN_COLUMNS}
+    for task in data["tasks"]:
+        marker = ("!" if task["attention"] else "") + ("@" if task["operator"] else "")
+        cells[task["column"]].append((marker, f"{task['id']} {task['subject']}"))
+    for task in data["recently_closed"]:
+        cells["closed"].append(("", f"{task['id']} {task['subject']} ({task['resolution']})"))
+    width = int(os.environ.get("COLUMNS") or 160)
+    colw = max(16, (width - 1 - 2 * (len(cells) - 1)) // len(cells))
+    def emit(values):
+        print("|" + "  ".join(values).rstrip())
+    emit([clip_pad_display(f"{('closed-24h' if c == 'closed' else c).upper()} ({len(cells[c])})", colw)
+          for c in cells])
+    height = max((len(v) for v in cells.values()), default=0)
+    limit = getattr(args, "max_rows", 0)
+    shown = min(height, limit) if limit else height
+    for index in range(shown):
+        values = []
+        for items in cells.values():
+            marker, text = items[index] if index < len(items) else ("", "")
+            if limit and index == shown - 1 and len(items) > shown:
+                marker, text = "", f"+{len(items) - shown + 1} more"
+            value = clip_pad_display(marker + text, colw)
+            values.append(paint("31" if "!" in marker else "33", value) if marker else value)
+        emit(values)
 
 
 def cmd_kanban(args: argparse.Namespace) -> int:
-
-
-    conn = wp.connect_readonly()
-    rows = open_tasks(conn)
-    paint = make_paint(args.no_color)
-    attn_list = attention_rows(conn, rows)
-    attn_ids = {r["id"] for r, _ in attn_list}
-    print(summary_line(conn, rows, attn_list, paint))
-    cells = {c: [] for c in wp.KANBAN_COLUMNS}
-    for r in rows:
-        marker = ("!" if r["id"] in attn_ids else "") + \
-                    ("@" if wp.waits_on_operator(conn, r) else "")
-        subject = r["subject"]
-        if wp.row_workflow(r) == "parent":
-            tot, closed_n = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(state='closed'),0) FROM"
-                " dispatch WHERE parent_id=?", (r["id"],)).fetchone()
-            subject = f"[{closed_n}/{tot}] {subject}"
-        cells[wp.kanban_column(r)].append((marker, f"{r['id']} {subject}"))
-    for r in conn.execute("SELECT * FROM dispatch WHERE state='closed' AND"
-                          " last_event >= ? ORDER BY last_event DESC",
-                          (wp.now() - 86400,)).fetchall():
-        tag = "" if r["resolution"] == "done" else f" ({r['resolution']})"
-        cells["closed"].append(("", f"{r['id']} {r['subject']}{tag}"))
-
-    width = int(os.environ.get("COLUMNS") or 160)
-    ncols = len(wp.KANBAN_COLUMNS)
-    colw = max(16, (width - 1 - 2 * (ncols - 1)) // ncols)
-
-    def cell(text: str, code: str = "") -> str:
-        text = clip_pad_display(text, colw)
-        return paint(code, text) if code else text
-
-    def emit(parts: list) -> None:
-
-
-        print("|" + "  ".join(parts).rstrip())
-
-    emit([cell(f"{('closed-24h' if c == 'closed' else c).upper()}"
-               f" ({len(cells[c])})") for c in wp.KANBAN_COLUMNS])
-    height = max((len(v) for v in cells.values()), default=0)
-    shown = min(height, args.max_rows) if args.max_rows else height
-    for i in range(shown):
-        line = []
-        for c in wp.KANBAN_COLUMNS:
-            col = cells[c]
-            if args.max_rows and i == shown - 1 and len(col) > shown:
-                line.append(cell(f"+{len(col) - shown + 1} more"))
-            elif i < len(col):
-                marker, text = col[i]
-                code = "31" if "!" in marker else \
-                    ("33" if "@" in marker else "")
-                line.append(cell(f"{marker}{text}", code))
-            else:
-                line.append(cell(""))
-        emit(line)
-    return 0
+    args.view = "columns"
+    return cmd_board(args)
 
 
 def cmd_tree(args: argparse.Namespace) -> int:
-    conn = wp.connect_readonly()
-    if args.id:
-        parents = [wp.fetch(conn, args.id)]
+    historical = getattr(args, "all", False) or bool(args.id)
+    result = {"fleet": fleet_label(), "goals": []}
+    if not wp.configured_db_path().exists():
+        if args.id:
+            raise ValueError("this fleet has no recorded goals")
     else:
-        parents = conn.execute("SELECT * FROM dispatch WHERE workflow='parent'"
-                               " ORDER BY created_ms").fetchall()
-        if not parents:
-
-
-            parents = [r for r in conn.execute(
-                "SELECT * FROM dispatch WHERE state != 'closed' ORDER BY created_ms")
-                if wp.needed_by_ids(conn, r["id"])
-                and not wp.needs_ids(conn, r["id"])]
-    if not parents:
-        print("OK    no parent goals and no dependency roots")
+        conn = wp.connect_readonly()
+        try:
+            if args.id:
+                parents = [wp.fetch(conn, args.id)]
+            else:
+                parents = conn.execute("SELECT * FROM dispatch WHERE workflow='parent'"
+                                       + ("" if historical else " AND state != 'closed'")
+                                       + " ORDER BY created_ms").fetchall()
+                if not parents:
+                    parents = [r for r in open_tasks(conn)
+                               if wp.needed_by_ids(conn, r["id"]) and not wp.needs_ids(conn, r["id"])]
+            def collect(row):
+                kids = wp.children(conn, row["id"])
+                return {**dict(row), "children_summary": children_breakdown(conn, row["id"]),
+                        "needs": [{"id": p["id"], "state": p["state"]} for p in wp.predecessors(conn, row["id"])],
+                        "needed_by": wp.needed_by_ids(conn, row["id"]),
+                        "children": [collect(child) for child in kids if historical or not wp.is_closed(child)]}
+            result["goals"] = [collect(row) for row in parents]
+        finally:
+            conn.close()
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False))
         return 0
-
-    def show(row, depth):
+    print(fleet_heading() + (" | goal history" if historical else " | current goals"))
+    def show(row, depth=0):
         pad = "  " * depth
-        kids = wp.children(conn, row["id"])
-        marker = f" [{children_breakdown(conn, row['id'])}]" if kids else ""
-        print(f"{pad}{row['id']}  [{wp.row_workflow(row)}] {row['state']}"
-              f"{marker}  {row['subject'][:70]}")
-
-
-        for pred in wp.predecessors(conn, row["id"]):
-            state = "closed" if wp.is_closed(pred) else pred["state"]
-            print(f"{pad}    needs {pred['id']} ({state})")
-        waiting = wp.needed_by_ids(conn, row["id"])
-        if waiting:
-            print(f"{pad}    needed by {', '.join(waiting)}")
-        for k in kids:
-            show(k, depth + 1)
-
-    for p in parents:
-        show(p, 0)
+        print(f"{pad}{row['id']}  {row['state']}  {row['subject']} [{row['children_summary']}]")
+        for pred in row["needs"]:
+            print(f"{pad}  needs {pred['id']} ({pred['state']})")
+        if row["needed_by"]:
+            print(f"{pad}  needed by {', '.join(row['needed_by'])}")
+        for child in row["children"]:
+            show(child, depth + 1)
+    for goal in result["goals"]:
+        show(goal)
+    if not result["goals"]:
+        print("No active goals or dependency roots. Use goals --all to inspect history.")
     return 0
 
 
@@ -2128,7 +2193,7 @@ def escalate(conn, row, reason: str, dry: bool, prefix: str = "",
     if question is not None:
         decision = ("\n\nDecision needed: "
                     f"{question['note'].removeprefix(wp.ASK_NOTE_PREFIX)}")
-    inspect = f"{SCRIPT_DIR / 'orc'} show {row['id']}"
+    inspect = wp.orc_task_command(row['id'], command=str(SCRIPT_DIR / 'orc'))
     body = (f"{prefix}{reason}. Subject: {row['subject'][:200]}."
             f"{decision}\n\nInspect the original task: `{inspect}`."
             " Decide only within your existing authority; otherwise"
@@ -2306,7 +2371,7 @@ def tick_pr_guards(conn, dry: bool, *, pool_registry_fresh: bool = True) -> None
                              f"review requested: {row['subject']}"[:180],
                              f"Task {row['id']} is ready for review"
                              f" (readiness guard: {first}). Record your verdict:"
-                             f" fleet-orchestrator.py verdict {row['id']}"
+                             f" {wp.orc_command('review', 'verdict', row['id'])}"
                              f" blockers|clean --note '<findings or PR-review link>'",
                              row["parent_id"],
                              expected_responsibility_version=
@@ -2348,8 +2413,7 @@ def tick_pr_guards(conn, dry: bool, *, pool_registry_fresh: bool = True) -> None
                                  row["reviewer_seat"],
                                  f"re-review: {row['subject']}"[:180],
                                  f"Task {row['id']}: {stale_note}. Record your verdict"
-                                 f" when done: fleet-orchestrator.py verdict"
-                                 f" {row['id']} blockers|clean --note"
+                                 f" when done: {wp.orc_command('review', 'verdict', row['id'])} blockers|clean --note"
                                  f" '<findings or PR-review link>'", row["parent_id"],
                                  expected_responsibility_version=
                                  row["responsibility_version"])
@@ -2629,7 +2693,7 @@ def tick_reviewer_rotation(conn, dry: bool,
                  f" {routed_row['subject']}"[:180],
                  f"Task {routed_row['id']} rotated to you: the previous reviewer"
                  f" ({current_label}) {reason}. Record your verdict:"
-                 f" fleet-orchestrator.py verdict {routed_row['id']}"
+                 f" {wp.orc_command('review', 'verdict', routed_row['id'])}"
                  " blockers|clean"
                  f" --note '<findings or PR-review link>'",
                  routed_row["parent_id"],
@@ -3748,7 +3812,7 @@ def continuation_reminder_text(task_id: str, context: dict) -> str:
     orc_bin = str(SCRIPT_DIR / "orc")
     return (
         f"ORC continuation reminder for {task_id}: {context['label']}.\n"
-        f"Inspect the durable record: {orc_bin} show {task_id}\n"
+        f"Inspect the durable record: {wp.orc_task_command(task_id, command=str(orc_bin))}\n"
         "This reminder grants no authority. Continue only work already"
         " authorized by the task. Do not merge, deploy, delete, or"
         " communicate externally unless separately authorized. If another"
@@ -3817,7 +3881,7 @@ def flush_seat_nudges(conn, seat_nudges: dict, tmux_send) -> int:
             ).fetchone()
             context = wp.continuation_context(conn, task) if task else None
             label = context["label"] if context else "inspect current action"
-            task_lines.append(f"- {tid}: {label}; {orc_bin} show {tid}")
+            task_lines.append(f"- {tid}: {label}; {wp.orc_task_command(tid, command=str(orc_bin))}")
         more = len(plan["due"]) - len(shown)
         more_line = (f"\n- {more} more: run {orc_bin} board" if more else "")
         task_block = "\n".join(task_lines)
@@ -3945,7 +4009,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(prog=os.environ.get("ORC_CLI_PROG", "orc"), description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def add_open_args(p, dispatchable=False):
@@ -4110,12 +4174,26 @@ def main() -> int:
                         " the whole fleet genuinely must hear it")
     p.set_defaults(func=cmd_announce)
 
-    p = sub.add_parser("board", help="every open task: state, wake rung, flags")
+    p = sub.add_parser("overview", help="the selected fleet's current goals and work")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_overview)
+
+    p = sub.add_parser("agents", help="members and terminal windows in this fleet")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_agents)
+
+    p = sub.add_parser("board", help="current work in the selected fleet")
     p.add_argument("--repo")
+    p.add_argument("--view", choices=("table", "columns", "summary"), default="table")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--no-color", action="store_true")
+    p.add_argument("--max-rows", type=int, default=0)
     p.set_defaults(func=cmd_board)
 
-    p = sub.add_parser("tree", help="parent-goal rollup")
+    p = sub.add_parser("tree", help="current goals; include history with --all")
     p.add_argument("id", nargs="?")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_tree)
 
     p = sub.add_parser("tick", help="the 5-minute engine tick")
@@ -4202,8 +4280,15 @@ def main() -> int:
     p = sub.add_parser("brief", help="what waits on the operator, verbatim bodies")
     p.set_defaults(func=lambda a: lazy_ledger().cmd_brief(a))
 
+    display_command = os.environ.get("ORC_CLI_COMMAND")
+    if display_command and len(sys.argv) > 1 and sys.argv[1] in sub.choices:
+        sub.choices[sys.argv[1]].prog = parser.prog + " " + display_command
     args = parser.parse_args()
     try:
+        if (os.environ.get("ORC_CLI_COMMAND")
+                and args.cmd not in {"board", "overview", "tree", "agents"}
+                and not getattr(args, "json", False)):
+            print(fleet_heading())
         return args.func(args)
     except ValueError as exc:
         print(f"FAIL  {exc}", file=sys.stderr)

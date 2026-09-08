@@ -212,7 +212,7 @@ class SessionFleetTest(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["database"], self.view("alpha")["agent_bus_db"])
         explicit = self.run_command([BUS, "--fleet", "default", "environment"], env=env)
         self.assertEqual(json.loads(explicit.stdout)["database"], str(self.root / "default/bus/inbox.sqlite3"))
-        self.assertIn("board empty", self.run_command([ORC, "board"], env=env).stdout)
+        self.assertIn("No open tasks.", self.run_command([ORC, "board"], env=env).stdout)
         listing = self.run_command([ROOT / "scripts/tview", "--list"], env=env).stdout
         self.assertIn("alpha", listing)
         self.assertIn("beta", listing)

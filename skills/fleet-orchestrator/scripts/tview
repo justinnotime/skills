@@ -18,6 +18,7 @@ Usage: tview [WINDOW]
        tview -t SESSION[:WINDOW]
        tview [-f NAME] [-w WINDOW]
        tview -l [-j]
+       orc fleet NAME view [WINDOW]
        orc tview [same options]
 
   -t, --target SESSION[:WINDOW]  Select a session/fleet and optional window
@@ -34,7 +35,7 @@ the current/default fleet. A session name or configured fleet alias is accepted.
 Attach through a persistent grouped view dedicated to this terminal. The view
 shares windows/processes with the primary session but keeps an independent
 current window. One positional argument always selects a window by index or
-exact name. --list shows configured fleets, their primary sessions and current
+exact name. --list shows live fleets and saved work, their primary sessions and current
 availability without starting a server or creating a session. --fleet default
 or its configured alias selects the default fleet explicitly.
 

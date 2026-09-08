@@ -3986,7 +3986,7 @@ class SendLegTests(StoreTestCase):
             self.record_current_message(conn, did, "dispatch", f"dispatch:{did}",
                           "no-such-seat", "s", "b")
         out = self.run_cli(ORC, "board")
-        self.assertIn("SEND-FAILED x1", out)
+        self.assertIn("Message delivery pending", out)
 
     def test_board_flags_invalid_target_separately(self):
         conn = wp.connect_writable()
@@ -3997,7 +3997,7 @@ class SendLegTests(StoreTestCase):
                                    "ambiguous-seat", "s", "b")
             wp.refuse_recorded_target(conn, row_id, "matches two identities")
         out = self.run_cli(ORC, "board")
-        self.assertIn("INVALID-TARGET x1", out)
+        self.assertIn("Recipient could not be resolved", out)
 
 
 class ReviewRound2Tests(StoreTestCase):
@@ -4749,7 +4749,7 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertEqual([n["target"] for n in notices],
                          ["requester", "requester"])
         self.assertIn(question, notices[0]["body"])
-        self.assertIn(f"{ROOT / 'scripts' / 'orc'} show {did}",
+        self.assertIn(f"{ROOT / 'scripts' / 'orc'} -t default task show {did}",
                       notices[0]["body"])
         self.assertFalse(wp.message_is_current_responsibility(
             conn, notices[0], task),
@@ -5511,14 +5511,18 @@ class DependencyGraphTests(StoreTestCase):
         self.open_task("frontier unrelated")
         unrelated = self.id_of("frontier unrelated")
         out = self.run_cli(ORC, "board")
-        frontier = out.split("--- FRONTIER", 1)[1]
+        data = json.loads(self.run_cli(ORC, "board", "--json"))
+        frontier = [t["id"] for t in data["tasks"] if t["frontier"]]
+        self.assertIn("ready now", out)
         self.assertIn(root, frontier)
         self.assertNotIn(nxt, frontier)
         self.assertNotIn(unrelated, frontier)
         self.run_cli(LEDGER, "close", root, "--resolution", "done")
         self.run_cli(ORC, "tick")
         out = self.run_cli(ORC, "board")
-        frontier = out.split("--- FRONTIER", 1)[1]
+        data = json.loads(self.run_cli(ORC, "board", "--json"))
+        frontier = [t["id"] for t in data["tasks"] if t["frontier"]]
+        self.assertIn("ready now", out)
         self.assertIn(nxt, frontier)
         self.assertNotIn(root, frontier)
 
@@ -5527,9 +5531,11 @@ class DependencyGraphTests(StoreTestCase):
         pred = self.id_of("board pred")
         self.open_task("board successor", "--needs", pred, to="tmux9")
         out = self.run_cli(ORC, "board")
-        line = [ln for ln in out.splitlines() if "board successor" in ln][0]
-        self.assertIn("owes=nobody", line)
-        self.assertIn(pred, line)
+        data = json.loads(self.run_cli(ORC, "board", "--json"))
+        task = next(t for t in data["tasks"] if t["subject"] == "board successor")
+        self.assertEqual(task["owner"], "nobody")
+        self.assertEqual(task["blockers"], [pred])
+        self.assertIn(f"waits on {pred}", out)
 
     def test_tree_renders_needs_edges_both_ways(self):
         self.open_task("tree root")
@@ -7823,7 +7829,7 @@ class KanbanTests(StoreTestCase):
             conn.execute("UPDATE dispatch SET state='acked' WHERE id=?", (did,))
             wp.record(conn, did, "ack", "fixture")
         out = self.run_cli(ORC, "kanban", "--no-color")
-        grid = [l for l in out.splitlines() if not l.startswith("ORC")]
+        grid = [l for l in out.splitlines() if not l.startswith(("Fleet ", "WARN "))]
         self.assertTrue(grid)
         for line in grid:
             self.assertTrue(line.startswith("|"), repr(line))
@@ -8801,11 +8807,11 @@ class CompletionClaimStateTests(StoreTestCase):
             self.assertIsNone(wp.claim_standing(conn, wp.fetch(conn, did)),
                               "legacy notes are audit text, not claims")
         conn.close()
-        board = self.run_cli(ORC, "board")
-        for line in board.splitlines():
-            if did[:8] in line:
-                self.assertNotIn("CLAIMS-DONE", line,
-                                 "board flag must read the typed table only")
+        data = json.loads(self.run_cli(ORC, "board", "--json"))
+        task = next(t for t in data["tasks"] if t["id"] == did)
+        self.assertFalse(any(flag.startswith("CLAIMS-DONE") for flag in task["flags"]),
+                         "board flag must read the typed table only")
+        self.assertNotIn("Completion claimed", self.run_cli(ORC, "board"))
 
     def test_terminal_close_settles_the_claim_in_the_same_transaction(self):
 
@@ -9125,9 +9131,10 @@ class CompletionClaimStateTests(StoreTestCase):
         self.assertEqual(row["status"], "standing",
                          "the claim is visible to a brand-new connection")
         board = self.run_cli(ORC, "board")
-        hit = [ln for ln in board.splitlines() if did[:8] in ln]
-        self.assertTrue(hit and "CLAIMS-DONE r1" in hit[0],
-                        f"a new process must see the standing claim: {hit}")
+        data = json.loads(self.run_cli(ORC, "board", "--json"))
+        task = next(t for t in data["tasks"] if t["id"] == did)
+        self.assertIn("CLAIMS-DONE r1", task["flags"])
+        self.assertIn("Completion claimed; awaiting review", board)
 
 
 class TurnEventTests(StoreTestCase):
@@ -9379,7 +9386,8 @@ class NudgeCoalesceTests(StoreTestCase):
         self.assertIn("This reminder grants no authority", reminder)
         for did, _generation in plan["tmux9"]["due"]:
             self.assertIn(did, reminder)
-            self.assertIn(f"orc show {did}", reminder)
+            self.assertIn(f"task show {did}", reminder)
+            self.assertIn("orc -t ", reminder)
         self.assertNotIn("nudge_key", kwargs,
                          "an actionable reminder keeps the peer-message header")
         fails = conn.execute("SELECT SUM(fails) FROM wake_attempt").fetchone()[0]

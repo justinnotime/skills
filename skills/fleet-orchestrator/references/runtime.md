@@ -12,10 +12,10 @@ python3 scripts/install
 export PATH="$HOME/.local/bin:$PATH"
 orc --help
 agent-bus --help
-orc open --to operator --subject "Review the sample output" \
+orc task open --to operator --subject "Review the sample output" \
   --body "Inspect the generated output and record the decision." --no-check
 orc board
-orc verify
+orc admin verify
 ```
 
 Installation creates command launchers only. It does not register identities,
@@ -23,11 +23,65 @@ send messages, alter a crontab, install services, or restart agents. Existing
 unmanaged commands require explicit replacement and are backed up when replaced.
 Keep the package at its installed location, or rerun installation after moving it.
 
-The `orc` command covers task creation, dependencies, roles, review, completion,
-handoffs, periodic checks, and database inspection. Run `orc <command> --help`
-for exact arguments. `orc tick --dry-run` previews scheduler actions without
-sending them; a real `tick` may execute configured checks and send task reminders.
-Scheduling belongs to the caller. Do not run a real tick for a status request.
+### Fleet work and terminal views
+
+`orc` lists fleets with terminal availability and current work. `orc fleet NAME`
+opens that fleet's work overview; `tview -t NAME` enters its terminal windows.
+Both use the same names, default alias, session groups and saved history.
+Grouped terminal viewers never become additional fleets. Stopped local fleets
+with saved tasks or messages remain discoverable without starting a terminal.
+
+```bash
+orc
+orc --json
+orc fleet example
+orc fleet example board
+orc fleet example board --view columns
+orc fleet example board --view summary
+orc fleet example board --repo example-project --json
+orc fleet example goals
+orc fleet example goals --all
+orc fleet example task show TASK_ID
+orc fleet example agents
+orc fleet example view 3
+```
+
+The short selector `orc -t example board` selects the same fleet as
+`orc fleet example board`. Fleet names that collide with a legacy lifecycle
+word (such as `tick`, `list` or `stop`) can always use `-t NAME`. Unlike tview,
+ORC's `-t` selects only a fleet; a window is an argument of `view`.
+
+Inside a real tmux pane, `orc board`, `orc task show TASK_ID` and `orc agent
+onboard ID` follow that pane's actual fleet. An explicit selector overrides it
+for the command and its descendants. Outside tmux the existing configured
+default/environment selection applies. `orc` without arguments always lists
+fleets, and `orc -t NAME` shows one fleet's overview.
+
+Work is organized into `task`, `goal`, `agent` and `review` commands. `goals`
+and `agents` are the list views for their respective groups. `goal open` uses
+the existing parent-task workflow; it does not create a second goal store.
+`goals` hides closed goals and children by default; `--all` or an explicit goal
+ID includes history. `agent role` and `goal team` preserve existing assignments.
+Run `orc fleet NAME task --help` or a leaf command's `--help` for arguments.
+
+Board table, columns, summary and JSON share one read-only selection, including
+repository filtering. Counts include parent tasks, as the existing task store
+does; `goals` counts that subset separately. Empty fleets can be inspected
+without creating task or message databases. JSON board output is an object
+with `fleet`, `tasks`, `goals`, `counts`, `recently_closed`, `scheduler` and
+`warnings`; unknown work is reported as unknown, never zero, in the fleet list.
+`task list --json` retains its existing newline-delimited task objects.
+
+Maintenance belongs under `orc fleet NAME admin`. `orc admin tick` runs the
+configured scheduler across fleets; `orc fleet NAME admin tick` runs only that
+fleet. Add `--dry-run` to inspect without executing checks or sending reminders.
+A status request never authorizes a real scheduler tick.
+
+Existing flat commands (`open`, `tree`, `kanban`, `statusline`, etc.),
+`orc --fleet NAME COMMAND`, `orc tview`, and verb-before-name lifecycle forms
+continue to forward to the same handlers. They have no separate state or
+implementation. `tree` now defaults to current goals too; use `tree --all` for
+its historical output. Use `board --view columns|summary` in new integrations.
 
 Ordinary local fleets are native tmux session groups: the session name selects the
 task and message stores. There is no separate local fleet configuration to
@@ -39,7 +93,7 @@ You do not need to create a tmux session first. Start or reuse a workgroup and
 enter its windows with:
 
 ```bash
-orc fleet start example
+orc fleet example start
 tview --fleet example
 ```
 
@@ -54,13 +108,13 @@ These are independent operations, not a sequence to run together:
 
 | Operation | Command | Effect on tmux |
 |---|---|---|
-| Start or resume a workgroup | `orc fleet start NAME` | Create or reuse its named session |
+| Start or resume a workgroup | `orc fleet NAME start` | Create or reuse its named session |
 | Enter its terminals | `tview --fleet NAME` | View the same shared windows |
-| Add a terminal | `orc fleet window [NAME]` | Create a window in the selected session |
-| Rename a workgroup | `orc fleet rename OLD NEW` | Rename the session and retain its history association |
-| End a workgroup | `orc fleet stop [NAME]` | Terminate all its shared windows and the processes in them; retain saved work |
+| Add a terminal | `orc fleet NAME window` | Create a window in the selected session |
+| Rename a workgroup | `orc fleet OLD rename NEW` | Rename the session and retain its history association |
+| End a workgroup | `orc fleet NAME stop` | Terminate all its shared windows and the processes in them; retain saved work |
 
-`create` remains an alias for `start`. Stop closes the session's shared windows
+The legacy `orc fleet create NAME` remains an alias for `start`. Stop closes the session's shared windows
 so grouped viewer sessions cannot keep its agents running. It retires the
 stopped panes' registered identities and retains task/message history. Follow
 any caller-owned checkout/handoff requirements before stopping. Reopening the
@@ -71,7 +125,7 @@ restart is needed for command selection. Agent registration and model startup
 still use the normal onboarding procedure.
 
 Each used local session stores one immutable `@orc-runtime` history key on
-tmux itself. `orc fleet rename OLD NEW` records the new name as a relative
+tmux itself. `orc fleet OLD rename NEW` records the new name as a relative
 filesystem alias to the original runtime directory and renames the session.
 It never moves a running SQLite database. Old names still reach the same saved
 work; reopening the new name after stop does too. A conflicting session or
@@ -83,7 +137,7 @@ running store through that key. It does not record a durable history rename;
 use the ORC rename command when the new name must survive session destruction.
 Raw `tmux kill-session` follows native tmux semantics: linked windows can remain
 alive in grouped viewers. Such a surviving group remains discoverable. Use
-`orc fleet stop` to close the whole group and its agents.
+`orc fleet NAME stop` to close the whole group and its agents.
 
 ### State authority and scheduling
 
@@ -100,14 +154,14 @@ an empty fleet or a reason to trust old cached identities. Opening a read-only
 board does not create or migrate the bus database. A window's existence does
 not register a model, transfer its tasks, or prove that it responds to messages.
 
-Configure one machine schedule to call `orc fleet tick`. It discovers the
+Configure one machine schedule to call `orc admin tick`. It discovers the
 default and live local fleets with existing task databases, runs them with
 bounded concurrency, and uses each task store's existing lock. A slow or failed
 fleet does not prevent another from starting. Newly created shell-only sessions
 need no database or scheduling job. Local fleets process their own recorded work
 and do not import the default fleet's configured GitHub projects or run its
-global repository patrol. Explicit `orc --fleet NAME tick` remains a single-fleet
-command. `orc fleet tick --dry-run` inspects without scheduling writes or sends.
+global repository patrol. Explicit `orc fleet NAME admin tick` remains a single-fleet
+command. `orc admin tick --dry-run` inspects without scheduling writes or sends.
 Explicit legacy/network profiles keep their separately configured schedules.
 
 ### Finding and entering fleets

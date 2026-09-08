@@ -1,54 +1,204 @@
-#!/usr/bin/env bash
-set -euo pipefail
-export PYTHONDONTWRITEBYTECODE=1
+#!/usr/bin/env python3
+"""Fleet-first public entry. Legacy spellings forward to the same handlers."""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILE="$HERE/lib/fleet-profile.py"
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+HERE = Path(__file__).resolve().parent
 
-if [[ "${1:-}" == "--config" ]]; then
-  (($# >= 3)) || { echo "usage: orc --config FILE <command> [...]" >&2; exit 2; }
-  export FLEET_ORCHESTRATOR_CONFIG="$2"
-  shift 2
-fi
+GROUPS = {
+    "task": ("list", "open", "dispatch", "show", "ack", "note", "blocked",
+             "reassign", "claim-done", "close", "chase", "link", "handshake", "announce"),
+    "goal": ("list", "show", "open", "team"),
+    "agent": ("list", "onboard", "checkout", "role", "pane-succession"),
+    "review": ("verdict", "receipt"),
+    "admin": ("doctor", "verify", "snapshot", "tick", "overdue", "import-state", "config"),
+}
+LEGACY_LIFECYCLE = {"create": "create", "start": "create", "stop": "stop",
+                    "window": "window", "rename": "rename", "show": "resolve",
+                    "apply-tmux": "apply-tmux"}
 
-if [[ "${1:-}" == "fleet" ]]; then
-  (($# >= 2)) || {
-    echo "usage: orc fleet start|window|rename|stop|show|tick [...]" >&2
-    exit 2
-  }
-  action=$2
-  shift 2
-  case "$action" in
-    create|start)
-      exec python3 "$PROFILE" create "$@"
-      ;;
-    window|stop|rename)
-      exec python3 "$PROFILE" "$action" "$@"
-      ;;
-    show)
-      exec python3 "$PROFILE" resolve "$@"
-      ;;
-    apply-tmux)
-      exec python3 "$PROFILE" apply-tmux "$@"
-      ;;
-    tick)
-      exec python3 "$HERE/fleet-tick.py" "$@"
-      ;;
-    *)
-      echo "usage: orc fleet start|window|rename|stop|show|tick [...]" >&2
-      exit 2
-      ;;
-  esac
-fi
 
-selection=()
-if [[ "${1:-}" == "--fleet" ]]; then
-  (($# >= 3)) || { echo "usage: orc --fleet <name> <command> [...]" >&2; exit 2; }
-  selection=(--fleet "$2")
-  shift 2
-fi
-if [[ "${1:-}" == "tview" ]]; then
-  shift
-  exec "$HERE/tview" "${selection[@]}" "$@"
-fi
-exec python3 "$PROFILE" exec-current "${selection[@]}" -- python3 "$HERE/fleet-orchestrator.py" "$@"
+def run_script(name, args, *, env=None):
+    path = HERE / name
+    command = ([str(path)] if path.suffix != ".py" else [sys.executable, str(path)])
+    os.execvpe(command[0], [*command, *args], os.environ if env is None else env)
+
+
+def root_help():
+    print("""Usage: orc                         List fleets and their work
+       orc fleet NAME              Show one fleet's work
+       orc fleet NAME COMMAND      Work inside that fleet
+       orc -t NAME COMMAND         Short fleet selector, like tview -t
+       orc admin tick              Run the configured fleet scheduler
+
+Fleet commands:
+  board       Current work; --view table|columns|summary, --json, --repo
+  goals       Current goals; --all includes closed history
+  task        Create, inspect and update tasks
+  agents      Members and their terminal windows
+  review      Review verdicts and evidence
+  view [WIN]  Enter the same windows as tview -t NAME[:WIN]
+  start       Create or resume this fleet
+  window      Add a terminal window
+  rename NEW  Rename this fleet while preserving saved work
+  stop        Stop its terminals and retain saved work
+  admin       Diagnostics and maintenance for this fleet
+
+Use 'orc fleet NAME COMMAND --help' for command arguments.
+A leading --config FILE selects private runtime settings.
+Without an explicit selector, a command follows its actual tmux fleet.
+Legacy commands remain supported for existing scripts.""")
+
+
+def group_help(name, prefix):
+    print(f"Usage: {prefix} {name} {{{','.join(GROUPS[name])}}} ...")
+    print(f"Use '{prefix} {name} COMMAND --help' for arguments.")
+
+
+def inventory(profile, args):
+    parser = argparse.ArgumentParser(prog="orc", description="Fleets and their current work")
+    parser.add_argument("--json", action="store_true")
+    opts = parser.parse_args(args)
+    rows = profile.terminal_inventory()
+    failed = False
+    for row in rows:
+        row["work"] = None
+        if row["status"] != "invalid":
+            try:
+                env = profile.execution_env(row["name"])
+                result = subprocess.run(
+                    [sys.executable, str(HERE / "fleet-orchestrator.py"), "board", "--json"],
+                    env=env, capture_output=True, text=True, timeout=20, check=False)
+                if result.returncode:
+                    raise ValueError("work could not be read; inspect this fleet with 'board'")
+                data = json.loads(result.stdout)
+                row["work"] = data["counts"]
+                if data["warnings"]:
+                    row["detail"] = "; ".join(filter(None, [row["detail"], *data["warnings"]]))
+            except (OSError, ValueError, subprocess.TimeoutExpired, profile.FleetProfileError):
+                row["detail"] = "work unavailable; inspect this fleet with 'board'"
+                failed = True
+        else:
+            failed = True
+    if opts.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        print(f"{'FLEET':<20} {'TERMINAL':<16} {'GOALS':>6} {'TASKS':>6} {'NEEDS YOU':>10}  ENTER")
+        for row in rows:
+            counts = row["work"]
+            def count(key):
+                return str(counts[key]) if counts is not None else "?"
+            print(f"{row['name']:<20} {row['status']:<16} {count('goals'):>6} "
+                  f"{count('tasks'):>6} {count('operator'):>10}  {row['command']}")
+            if row["detail"]:
+                print(f"  {row['detail']}")
+        print("Open work: orc fleet NAME | Open terminals: tview -t NAME")
+    return int(failed)
+
+
+def main():
+    args = sys.argv[1:]
+    os.environ.pop("ORC_CLI_COMMAND", None)
+    os.environ.pop("ORC_CLI_PROG", None)
+    selected = None
+    while args and args[0] in {"--config", "--fleet", "-f", "-t", "--target"}:
+        flag = args.pop(0)
+        if not args or not args[0] or args[0].startswith("-"):
+            raise ValueError(f"{flag} requires a value")
+        value = args.pop(0)
+        if flag == "--config":
+            os.environ["FLEET_ORCHESTRATOR_CONFIG"] = value
+        elif selected is None:
+            selected = value
+        else:
+            raise ValueError("select a fleet only once")
+    if args in (["--help"], ["-h"]):
+        root_help()
+        return 0
+    # Load after --config, so every selector sees exactly the same settings.
+    sys.path.insert(0, str(HERE / "lib"))
+    spec = importlib.util.spec_from_file_location("orc_fleet_profile", HERE / "lib/fleet-profile.py")
+    profile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile)
+    try:
+        if args and args[0] == "fleet":
+            if selected is not None:
+                raise ValueError("select a fleet only once")
+            args = args[1:]
+            if not args or args[0] == "list":
+                return inventory(profile, args[1:] if args else [])
+            if args[0] in {"--help", "-h"}:
+                root_help()
+                return 0
+            # Old lifecycle forms are forwarded, never implemented separately.
+            if args[0] == "tick":
+                run_script("fleet-tick.py", args[1:])
+            if args[0] in LEGACY_LIFECYCLE:
+                run_script("lib/fleet-profile.py", [LEGACY_LIFECYCLE[args[0]], *args[1:]])
+            selected, args = args[0], args[1:]
+        if selected is None and (not args or args == ["--json"]):
+            return inventory(profile, args)
+        if args in (["--help"], ["-h"]):
+            root_help()
+            return 0
+        if args[:2] == ["admin", "tick"] and selected is None:
+            run_script("fleet-tick.py", args[2:])
+        if args and args[0] in {"tview", "view"}:
+            flags = ["--fleet", selected] if selected is not None else []
+            run_script("tview", [*flags, *args[1:]])
+        if not args:
+            args = ["overview"]
+        prefix = f"orc fleet {selected}" if selected else "orc"
+        if args[0] in {"start", "stop", "window", "rename"}:
+            action = args.pop(0)
+            name = selected or profile.command_selection()
+            run_script("lib/fleet-profile.py", ["create" if action == "start" else action, name, *args])
+        if args[0] in {"goals", "agents"}:
+            args = ["goal" if args[0] == "goals" else "agent", "list", *args[1:]]
+        if args[0] in GROUPS:
+            group, rest = args[0], args[1:]
+            if rest and rest[0] in {"--help", "-h"}:
+                group_help(group, prefix)
+                return 0
+            if not rest or rest[0].startswith("-"):
+                if group not in {"task", "goal", "agent"}:
+                    group_help(group, prefix)
+                    return 0
+                rest = ["list", *rest]
+            action, tail = rest[0], rest[1:]
+            os.environ["ORC_CLI_COMMAND"] = action
+            if action not in GROUPS[group]:
+                raise ValueError(f"unknown {group} command {action!r}; use {prefix} {group} --help")
+            prefix += " " + group
+            if group == "goal":
+                action = {"list": "tree", "show": "tree"}.get(action, action)
+                if action == "open":
+                    if any(x == "--workflow" or x.startswith("--workflow=") for x in tail):
+                        raise ValueError("goal open already selects the goal workflow")
+                    tail = [*tail, "--workflow", "parent"]
+            elif group == "agent" and action == "list":
+                action = "agents"
+            elif group == "admin" and action == "config":
+                run_script("lib/fleet-profile.py", ["resolve", selected or profile.command_selection(), *tail])
+            args = [action, *tail]
+        os.environ["ORC_CLI_PROG"] = prefix
+        flags = ["--fleet", selected] if selected is not None else []
+        run_script("lib/fleet-profile.py", ["exec-current", *flags, "--", sys.executable,
+                                              str(HERE / "fleet-orchestrator.py"), *args])
+    except profile.FleetProfileError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ValueError, OSError) as exc:
+        print(f"orc: {exc}", file=sys.stderr)
+        raise SystemExit(2)

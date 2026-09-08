@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Regression tests for fail-closed Agent Bus harness/mode registration.
+# Enter after fleet selection: this fixture supplies a synthetic terminal
+# location. Real selector and onboarding isolation are covered by
+# test_session_fleets.py; do not construct a second partial fleet runtime here.
 
 set -euo pipefail
 
@@ -57,7 +60,7 @@ run_boot() {
     MOCK_TMUX="$1" AGENT_BUS_HARNESS="${2:-}" AGENT_BUS_MODE="${3:-}" \
     MOCK_RETURN_HARNESS="${4:-}" AGENT_BUS_TRANSPORT="${5:-matrix}" \
     NW_FLEET="${6:-}" NW_FLEET_PROFILE_APPLIED="${6:-}" \
-    bash "$TMP/repo/scripts/agent-boot.sh" demo 2>&1)
+    bash "$TMP/repo/scripts/agent-boot.sh" --resolved demo 2>&1)
   rc=$?
   set -e
 }
@@ -156,7 +159,7 @@ make_fixture
 set +e
 output=$(HOME="$TMP/home" MATRIX_BUS_CFG="$TMP/cfg" JOIN_LOG="$TMP/join.log" \
   NOTES_RUNTIME_DIR="$TMP/rt" MOCK_TMUX='tmux=0:20.0 win=codex' \
-  TMUX_PANE='%9' bash "$TMP/repo/scripts/agent-boot.sh" demo 2>&1)
+  TMUX_PANE='%9' bash "$TMP/repo/scripts/agent-boot.sh" --resolved demo 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "boot with TMUX_PANE failed: $output"

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -208,6 +209,16 @@ KANBAN = {
     ("parent", "ready-to-close"): "review",
     ("parent", "closed"): "closed",
 }
+
+
+def orc_command(*args: str, command: str = "orc") -> str:
+    """Copyable actions retain their fleet even in another terminal."""
+    fleet = os.environ.get("NW_FLEET") or cfg.get("fleets.default_name", "default")
+    return shlex.join([command, "-t", fleet, *args])
+
+
+def orc_task_command(task_id: str, action: str = "show", command: str = "orc") -> str:
+    return orc_command("task", action, task_id, command=command)
 
 
 def kanban_column(row: sqlite3.Row) -> str:
@@ -664,9 +675,9 @@ def claim_commit(conn: sqlite3.Connection, row: sqlite3.Row,
         claim["body"] = (
             f"Task {row['id']} round {claim['round']}: {whoami()} claims done"
             f" at generation {claim['generation']}.\n\n{payload}\n\n"
-            f"Judge it: `orc show {row['id']}`; accept with"
-            f" `orc close {row['id']} --resolution done`, or return the work"
-            f" with `orc chase {row['id']}` / a blockers verdict.")
+            f"Judge it: `{orc_task_command(row['id'])}`; accept with"
+            f" `{orc_task_command(row['id'], 'close')} --resolution done`, or return the work"
+            f" with `{orc_task_command(row['id'], 'chase')}` / a blockers verdict.")
         claim["msg_row"] = None
         if claim["judge"] != "operator":
             expected_notice_id = latest_message_id(
@@ -754,7 +765,7 @@ def repair_standing_claim_notifications(conn: sqlite3.Connection,
                    f" {task['id']} {task['subject']}")
         body = ((prior["body"] if prior else "") or
                 f"Task {task['id']} has a standing completion claim round"
-                f" {claim['round']}. Inspect it with `orc show {task['id']}`"
+                f" {claim['round']}. Inspect it with `{orc_task_command(task['id'])}`"
                 " before judging.")
         judge = claim_judge(
             conn, task, registry_trusted=registry_trusted)
@@ -1360,7 +1371,7 @@ def terminal_notify(conn: sqlite3.Connection, row: sqlite3.Row,
     subject = f"terminal: {row['id']} {resolution or via}: {row['subject']}"
     body = (f"Task {row['id']} you awaited reached its terminal state via"
             f" {via}: resolution '{resolution or 'none'}'.\n"
-            f"Full trail: orc show {row['id']}")
+            f"Full trail: {orc_task_command(row['id'])}")
     row_id = record_msg(
         conn, row["id"], "terminal", f"terminal:{row['id']}", requester,
         subject, body,
@@ -2418,7 +2429,7 @@ def insert_task(conn: sqlite3.Connection, *, recipient: str, subject: str,
         if (value or "").strip().lower() in {"all", "@all"}:
             raise SystemExit(
                 f"FAIL  {field} cannot be all/@all: task responsibility needs"
-                " exactly one seat; use `orc announce` for broadcasts"
+                " exactly one seat; use `orc task announce` for broadcasts"
             )
     spec = workflow_spec(workflow)
 
@@ -3094,7 +3105,7 @@ def continuation_context(conn: sqlite3.Connection, row: sqlite3.Row, *,
             return {**obligation, "seat": requested, "agent_id": None,
                     "window": None, "deferred":
                     "an out-of-band task cannot use a mutable alias; assign"
-                    " the stable Agent Bus id or deliver it with orc dispatch",
+                    " the stable Agent Bus id or deliver it with orc task dispatch",
                     "generation":
                     f"{obligation['kind']}:{obligation['source']}:unproven-alias"}
         actual = str(resolved.get("recipient_agent_id") or "")
@@ -3837,8 +3848,7 @@ def repair_missing_responsibility_messages(conn: sqlite3.Connection,
         subject = f"responsibility sync: {task['subject']}"[:160]
         body = (f"ORC task {task['id']} is currently {task['state']} and is"
                 f" assigned to you after a responsibility transition."
-                f" Inspect the durable task before acting: orc show"
-                f" {task['id']}")
+                f" Inspect the durable task before acting: {orc_task_command(task['id'])}")
         with conn:
             row_id = record_msg(
                 conn, task["id"], purpose,
@@ -4243,7 +4253,7 @@ def escalate_dead_letters(conn: sqlite3.Connection, log=print) -> int:
                       f"Attempts: {r['attempts']} (state {r['send_state']})\n"
                       f"Last recorded error: {err_text}\n\n"
                       f"Fix is usually one of: make the target name exactly"
-                      f" one receiver, grant the missing role (orc role grant),"
+                      f" one receiver, grant the missing role (orc agent role grant),"
                       f" correct the task's recipient, or"
                       f" deliver the content manually. Original message body"
                       f" below.\n---\n{r['body']}"),

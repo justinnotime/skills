@@ -165,7 +165,7 @@ class FleetTickTest(unittest.TestCase):
         self.assertEqual(selected["NW_FLEET_PRIMARY_SESSION"], "tview-original")
         with mock.patch.dict(os.environ, selected, clear=True):
             import tmux_runtime
-            self.assertEqual(tmux_runtime.pane_scope(), ["-s", "-t", "=tview-original"])
+            self.assertEqual(tmux_runtime.pane_scope(), ["-s", "-t", "=tview-original:"])
 
     def test_dry_preparation_does_not_assign_a_tmux_history_option(self):
         selected = self.selection("alpha")
