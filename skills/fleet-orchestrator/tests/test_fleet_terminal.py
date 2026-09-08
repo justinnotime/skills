@@ -172,7 +172,7 @@ def test_actual_socket_and_primary_group_override_stale_fleet(selection, current
         if args[0] == "display-message":
             assert args[2:4] == ["-t", "%5"]
             assert process_env["TMUX"] == env["TMUX"]
-            return completed(f"/tmp/named-beta\t{current_session}\t{current_group}\n")
+            return completed(f"/tmp/named-beta\t4\t%5\t{current_session}\t{current_group}\n")
         assert args[:1] == ["-L"]
         assert "TMUX" not in process_env and "TMUX_PANE" not in process_env
         return completed(f"main\tgroup-1\t/tmp/{args[1]}\n")
@@ -183,11 +183,11 @@ def test_actual_socket_and_primary_group_override_stale_fleet(selection, current
 
 def test_unknown_current_session_refuses_inherited_or_default_fallback(selection):
     env, _, _ = selection
-    env.update(TMUX="/tmp/named-beta,4,0", NW_FLEET="alpha")
+    env.update(TMUX="/tmp/named-beta,4,0", TMUX_PANE="%5", NW_FLEET="alpha")
 
     def tmux(args, process_env):
         if args[0] == "display-message":
-            return completed("/tmp/named-beta\tunrelated\tother-group\n")
+            return completed("/tmp/named-beta\t4\t%5\tunrelated\tother-group\n")
         return completed(f"main\tmain-group\t/tmp/{args[1]}\n")
 
     with mock.patch.object(profile, "_terminal_tmux", side_effect=tmux):
@@ -195,11 +195,115 @@ def test_unknown_current_session_refuses_inherited_or_default_fallback(selection
             profile.terminal_target(env=env)
 
 
-def test_stale_tmux_reference_is_an_explicit_error(selection):
+STALE_PAIR = {"TMUX": "/tmp/live,1,0", "TMUX_PANE": "%5"}
+
+
+@pytest.mark.parametrize("answer", [
+    pytest.param(completed(code=1, stderr="no server running on /tmp/live"), id="server-gone"),
+    pytest.param(completed("/tmp/live\t1\t\t\t\n"), id="pane-gone-tmux-3.7-empty-fields"),
+    pytest.param(completed(code=1, stderr="can't find pane: %5"), id="pane-gone-older-tmux"),
+    pytest.param(completed("/tmp/live\t2\t%5\tmain\t\n"), id="restarted-server-reused-pane-number"),
+    pytest.param(completed("/tmp/live\t1\t%6\tmain\t\n"), id="another-pane-answered"),
+    pytest.param(completed("/tmp/live\t1\t%5\n"), id="truncated-record"),
+])
+def test_stale_tmux_pair_means_outside_tmux(selection, answer):
+    """A daemon started in a pane hands TMUX/TMUX_PANE to every shell it opens,
+    long after that server or pane is gone. Such a pair selects nothing: the
+    terminal is outside tmux, so NW_FLEET or the default applies, exactly as
+    when the variables are absent."""
     env, _, _ = selection
-    with mock.patch.object(profile, "_terminal_tmux", return_value=completed(code=1)):
-        with pytest.raises(profile.FleetProfileError, match="cannot inspect.*tview --list"):
-            profile.terminal_target(env={**env, "TMUX": "/missing,1,0"})
+
+    def tmux(args, process_env):
+        if args[0] == "display-message":
+            # Never an unqualified "current" query: tmux would answer it with
+            # an arbitrary attached client.
+            assert args[2:4] == ["-t", "%5"]
+            return answer
+        return completed(f"main\tgroup\t/tmp/{args[1]}\n")
+
+    with mock.patch.object(profile, "_terminal_tmux", side_effect=tmux):
+        assert profile.current_pane({**env, **STALE_PAIR}) is None
+        assert profile.terminal_target(env={**env, **STALE_PAIR})["name"] == "primary"
+        assert profile.terminal_target(env={**env, **STALE_PAIR, "NW_FLEET": "alpha"})["name"] == "alpha"
+        with pytest.raises(profile.FleetProfileError, match="does not exist"):
+            profile.terminal_target(env={**env, **STALE_PAIR, "NW_FLEET": "absent"})
+
+
+@pytest.mark.parametrize("pair", [
+    pytest.param({"TMUX": "/tmp/live,1,0"}, id="no-pane"),
+    pytest.param({"TMUX": "/tmp/live,1,0", "TMUX_PANE": "5"}, id="not-a-pane-id"),
+    pytest.param({"TMUX": "/tmp/live", "TMUX_PANE": "%5"}, id="tmux-without-server-pid"),
+    pytest.param({"TMUX": "/tmp/live,pid,0", "TMUX_PANE": "%5"}, id="non-numeric-server-pid"),
+    pytest.param({"TMUX": ",1,0", "TMUX_PANE": "%5"}, id="empty-socket"),
+])
+def test_unverifiable_tmux_pair_is_never_probed(selection, pair):
+    env, _, _ = selection
+
+    def tmux(args, process_env):
+        assert args[0] != "display-message", "an unverifiable pair must not ask tmux for a current client"
+        return completed(f"main\tgroup\t/tmp/{args[1]}\n")
+
+    with mock.patch.object(profile, "_terminal_tmux", side_effect=tmux):
+        assert profile.current_pane({**env, **pair}) is None
+        assert profile.terminal_target(env={**env, **pair})["name"] == "primary"
+        assert profile.terminal_target(env={**env, **pair, "NW_FLEET": "alpha"})["name"] == "alpha"
+
+
+def test_unanswered_pane_probe_is_reported_not_guessed(selection):
+    env, _, _ = selection
+    failure = profile.FleetProfileError("tmux inspection timed out")
+    with mock.patch.object(profile, "_terminal_tmux", side_effect=failure):
+        with pytest.raises(profile.FleetProfileError, match="timed out.*tview --list"):
+            profile.terminal_target(env={**env, **STALE_PAIR})
+
+
+def test_terminal_cli_ignores_stale_pair_from_a_daemon(selection, tmp_path):
+    env, _, _ = selection
+    stub = tmp_path / "tmux"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *display-message*) printf '/tmp/live\\t1\\t\\t\\t\\n' ;;\n"  # tmux 3.7 shape for a missing pane
+        "  *) echo 'no server running on /tmp/live' >&2; exit 1 ;;\n"
+        "esac\n"
+    )
+    stub.chmod(0o755)
+    env = {**env, "TMUX_BIN": str(stub), "TMUX": "/tmp/live,999999,166", "TMUX_PANE": "%195"}
+    result = subprocess.run([sys.executable, "-B", str(SCRIPT), "terminal"],
+                            env=env, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "primary\tprimary-server\tmain\n"
+    result = subprocess.run([sys.executable, "-B", str(SCRIPT), "terminal"],
+                            env={**env, "NW_FLEET": "alpha"}, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "alpha\tnamed-alpha\tmain\n"
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_real_tmux_pane_is_trusted_only_for_its_own_server_generation(selection, tmp_path):
+    env, _, _ = selection
+    env = {**env, "TMUX_TMPDIR": str(tmp_path), "LC_ALL": "C"}
+    command = [shutil.which("tmux"), "-L", "terminal-pane-test"]
+    started = subprocess.run([*command, "new-session", "-d", "-s", "main", "sleep 30"],
+                             env=env, text=True, capture_output=True, check=False)
+    assert started.returncode == 0, started.stderr
+    try:
+        # A detached server replaces tab delimiters without -u; use "|" here.
+        shown = subprocess.run([*command, "display-message", "-p", "-t", "main",
+                                "#{socket_path}|#{pid}|#{pane_id}"],
+                               env=env, text=True, capture_output=True, check=False)
+        assert shown.returncode == 0, shown.stderr
+        socket_path, server_pid, pane = shown.stdout.rstrip("\n").split("|")
+        live = {**env, "TMUX": f"{socket_path},{server_pid},0", "TMUX_PANE": pane}
+        assert profile.current_pane(live) == (socket_path, "main", "")
+        restarted = {**live, "TMUX": f"{socket_path},{int(server_pid) + 1},0"}
+        assert profile.current_pane(restarted) is None
+        assert profile.current_pane({**live, "TMUX_PANE": "%999999"}) is None
+    finally:
+        stopped = subprocess.run([*command, "kill-server"], env=env, text=True,
+                                 capture_output=True, check=False)
+        assert stopped.returncode == 0, stopped.stderr
+    assert profile.current_pane(live) is None
 
 
 def test_inventory_distinguishes_online_offline_and_missing_primary_without_mutation(selection):

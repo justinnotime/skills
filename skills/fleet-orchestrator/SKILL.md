@@ -33,7 +33,10 @@ For terminal entry, use `scripts/tview --list` to discover configured fleets and
 their actual tmux availability. Select `--fleet NAME` explicitly when switching
 fleets; `default` and its caller-configured alias refer to the same fleet. Inside
 tmux, an unselected `tview` follows the actual associated session, not a stale
-fleet environment variable. Listing and entering do not start offline fleets.
+fleet environment variable. Inherited `TMUX` and `TMUX_PANE` count as inside
+tmux only while the server that set them still owns that pane; a stale pair,
+such as one passed down by a daemon started in a pane, means outside tmux.
+Listing and entering do not start offline fleets.
 
 Ordinary local fleets are the live tmux session groups on the configured server;
 their names select separate task and message stores without a fleet profile.

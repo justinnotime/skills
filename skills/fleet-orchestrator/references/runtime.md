@@ -162,8 +162,13 @@ selection. A process-scoped marker prevents an old exported selector from
 redirecting a later unrelated command. Inside tmux, an unselected
 `tview` identifies the fleet from the actual socket and exact primary session
 or its session group, ignoring a stale `NW_FLEET`. Local sessions on the configured
-server map directly to their names. Outside tmux, `NW_FLEET` selects a configured
-fleet when present; otherwise `tview` enters the default fleet. A positional
+server map directly to their names. Inherited `TMUX` and `TMUX_PANE` are trusted
+only while the server that minted `TMUX` still owns that pane, verified by server
+process ID and pane ID; a stale pair, such as one passed down by a daemon that
+was started in a pane and outlived its server, is ignored, because tmux would
+otherwise answer "current" queries with an arbitrary attached client. Outside
+tmux, `NW_FLEET` selects a configured fleet when present; otherwise `tview`
+enters the default fleet. A positional
 argument remains a window index or exact window name, so `tview 3` keeps its
 meaning. Use `tview --fleet default` to return from a named fleet.
 

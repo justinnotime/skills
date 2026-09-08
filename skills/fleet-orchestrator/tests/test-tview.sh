@@ -254,11 +254,12 @@ for _ in {1..50}; do
 done
 [[ -n "$observer_tty" ]] || fail "observer client never attached"
 
+entry_env='TMUX= NW_FLEET='
 check_entry() {
   local label=$1 expected_group=$2 expected_window=$3 command row tty session group window pid navigation_window
   shift 3
   printf -v command '%q ' "$@"
-  TERM=xterm-256color timeout 10 script -qec "TMUX= NW_FLEET= $command" /dev/null \
+  TERM=xterm-256color timeout 10 script -qec "$entry_env $command" /dev/null \
     <"$stage/observer-input" >"$stage/$label.log" 2>&1 &
   pid=$!
   row=
@@ -296,6 +297,26 @@ check_entry default-alias 0 2 "$TVIEW" -t primary:two
 check_entry orc-target alternate 5 "$stage/orc" tview -t alternate:5
 check_entry orc-fleet alternate 5 "$stage/orc" --fleet alternate tview -w 5
 check_entry orc-long alternate 5 "$stage/orc" tview --fleet alternate --window 5
+
+# An inherited TMUX/TMUX_PANE pair that the minting server no longer owns (a
+# daemon started in a pane outlives that server and hands the pair to every
+# shell it opens) means outside tmux: tview enters in this terminal. Without
+# verification tmux answers "current" with an arbitrary attached client, and
+# switch-client would move the observer instead. check_entry asserts both.
+live_socket=$(tmux -L "$server" display-message -p '#{socket_path}')
+live_pid=$(tmux -L "$server" display-message -p '#{pid}')
+live_pane=$(tmux -L "$server" list-panes -t '=0:0' -F '#{pane_id}' | head -n 1)
+[[ -n "$live_socket" && "$live_pid" =~ ^[0-9]+$ && "$live_pane" == %* ]] \
+  || fail "could not read the private server's identity: $live_socket $live_pid $live_pane"
+entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET="
+check_entry stale-server-and-pane 0 2 "$TVIEW" 2
+entry_env="TMUX=$live_socket,$live_pid,0 TMUX_PANE=%999 NW_FLEET="
+check_entry stale-pane-on-live-server 0 1 "$TVIEW" -t :1
+entry_env="TMUX=$live_socket,999999,0 TMUX_PANE=$live_pane NW_FLEET="
+check_entry stale-server-reused-pane-number alternate 5 "$stage/orc" tview -t alternate:5
+entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET="
+check_entry stale-pair-explicit-default 0 1 "$stage/orc" tview -t default:1
+entry_env='TMUX= NW_FLEET='
 tmux -L "$server" detach-client -t "$observer_tty"
 wait "$observer_pid" || fail "observer exited nonzero"
 exec {observer_fd}>&-

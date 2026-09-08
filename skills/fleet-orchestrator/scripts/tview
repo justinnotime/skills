@@ -41,6 +41,9 @@ or its configured alias selects the default fleet explicitly.
 Inside tmux, an unselected fleet is identified by the actual socket and session
 group. Outside tmux, NW_FLEET selects a fleet when set; otherwise the default
 fleet is used. An unrecognized tmux session requires an explicit --fleet.
+Inherited TMUX/TMUX_PANE count as inside tmux only while the server that set
+them still owns that pane; a stale pair, such as one passed down by a daemon
+started in a pane, is ignored and the terminal is treated as outside tmux.
 
 Safety contract: tview never destroys the primary session or ANY attached
 session, and never enables tmux's automatic session destruction. The one
@@ -148,6 +151,26 @@ fi
 (( json_set == 0 )) || fail_usage "--json requires --list"
 [[ $window_set -eq 0 || -n "$requested_window" ]] \
   || fail_usage "window must not be empty"
+
+# TMUX and TMUX_PANE reach every descendant of a shell that started in a pane,
+# including daemons that outlive their tmux server and the shells those
+# daemons open later. Trust the pair only while the server that minted TMUX
+# still answers on that socket and still owns that pane; otherwise this
+# process is outside tmux. tmux answers "current" queries for a stale pair
+# with an arbitrary attached client, and switch-client would then move that
+# other terminal instead of entering here.
+if [[ -n ${TMUX:-} ]]; then
+  minted_by=${TMUX#*,}
+  minted_by=${minted_by%%,*}
+  pane_identity=
+  if [[ -n ${TMUX_PANE:-} ]]; then
+    pane_identity=$("$TMUX_BIN" display-message -p -t "$TMUX_PANE" \
+      '#{pid} #{pane_id}' 2>/dev/null || true)
+  fi
+  if [[ "$pane_identity" != "$minted_by ${TMUX_PANE:-}" ]]; then
+    unset TMUX TMUX_PANE
+  fi
+fi
 
 terminal_args=()
 if (( fleet_set )); then

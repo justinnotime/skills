@@ -1158,30 +1158,47 @@ def terminal_inventory(env: Mapping[str, str] = os.environ) -> list[dict[str, st
     return rows
 
 
+def current_pane(env: Mapping[str, str] = os.environ) -> tuple[str, str, str] | None:
+    """Return (socket_path, session, group) of the pane this process runs in.
+
+    TMUX and TMUX_PANE reach every descendant of a shell that started in a
+    pane, including daemons that outlive their tmux server and the shells
+    those daemons open later. The pair is trusted only while the server that
+    minted TMUX still answers on that socket and still owns that pane. tmux
+    answers a "current" query for a stale pair with an arbitrary attached
+    client, so an unverified pair is never used; the process is outside tmux.
+    """
+    minted = env.get("TMUX", "").split(",")
+    pane = env.get("TMUX_PANE", "")
+    if len(minted) < 3 or not minted[0] or not minted[1].isdigit() \
+            or not re.fullmatch(r"%\d+", pane):
+        return None
+    try:
+        result = _terminal_tmux([
+            "display-message", "-p", "-t", pane,
+            "#{socket_path}\t#{pid}\t#{pane_id}\t#{session_name}\t#{session_group}",
+        ], env)
+    except FleetProfileError as exc:
+        raise FleetProfileError(
+            f"{exc}; run tview --list and select --fleet NAME"
+        ) from exc
+    fields = result.stdout.rstrip("\n").split("\t")
+    if result.returncode or len(fields) != 5:
+        return None
+    socket_path, server_pid, pane_id, session, group = fields
+    if server_pid != minted[1] or pane_id != pane or not socket_path or not session:
+        return None
+    return socket_path, session, group
+
+
 def terminal_target(name: str | None = None,
                     env: Mapping[str, str] = os.environ) -> dict[str, str]:
     """Prefer an explicit fleet, then the actual current terminal association."""
     if name is not None:
         return _terminal_target(name, env)
-    if not env.get("TMUX"):
+    current = current_pane(env)
+    if current is None:
         return _terminal_target(env.get("NW_FLEET") or "default", env)
-
-    args = ["display-message", "-p"]
-    if env.get("TMUX_PANE"):
-        args.extend(["-t", env["TMUX_PANE"]])
-    args.append("#{socket_path}\t#{session_name}\t#{session_group}")
-    try:
-        result = _terminal_tmux(args, env)
-    except FleetProfileError as exc:
-        raise FleetProfileError(
-            f"{exc}; run tview --list and select --fleet NAME"
-        ) from exc
-    current = result.stdout.rstrip("\n").split("\t")
-    if result.returncode or len(current) != 3 or not current[0] or not current[1]:
-        raise FleetProfileError(
-            "cannot inspect the current tmux session; "
-            "run tview --list and select --fleet NAME"
-        )
     socket_path, session, group = current
     matches = []
     for candidate in _configured_names(env):
