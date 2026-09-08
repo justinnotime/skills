@@ -223,7 +223,7 @@ def test_inventory_distinguishes_online_offline_and_missing_primary_without_muta
     ]
     assert len(seen) == 5  # Discovery, default group recovery, and three target observations.
     assert before == {p.name: p.read_bytes() for p in profiles.iterdir()}
-    assert rows[0]["command"] == "tview --fleet primary"
+    assert rows[0]["command"] == "tview -t primary"
     assert all(set(row) == {"name", "tmux_server", "primary_session", "status", "command", "detail"}
                for row in rows)
 

@@ -53,6 +53,8 @@ cat >"$stage/config.json" <<EOF
 EOF
 cat >"$stage/tview" <<EOF
 #!/usr/bin/env bash
+runtime="$TVIEW_RUNTIME"
+[[ \${0##*/} != orc ]] || runtime="$ROOT/scripts/orc"
 exec env -u NW_TMUX_SERVER -u NW_FLEET_PROFILE_APPLIED \
   -u MATRIX_BUS_ROOM -u MATRIX_BUS_REGISTRY_ROOM \
   HOME="$stage/home" XDG_CONFIG_HOME="$stage/home/.config" \
@@ -61,9 +63,10 @@ exec env -u NW_TMUX_SERVER -u NW_FLEET_PROFILE_APPLIED \
   NW_DEFAULT_TMUX_SERVER="$server" NW_FLEET_PROFILE_DIR="$stage/fleets" \
   NW_FLEET_RUNTIME_ROOT="$stage/runtime" NW_FLEET_MATRIX_CFG_ROOT="$stage/matrix" \
   TVIEW_FLEET_PROFILE="$ROOT/scripts/lib/fleet-profile.py" \
-  TMUX_BIN="$(command -v tmux)" "$TVIEW_RUNTIME" "\$@"
+  TMUX_BIN="$(command -v tmux)" "\$runtime" "\$@"
 EOF
 chmod +x "$stage/tview"
+cp "$stage/tview" "$stage/orc"
 TVIEW="$stage/tview"
 
 tmux -f /dev/null -L "$server" new-session -d -s 0 -n user-shell 'sleep 300' \
@@ -110,6 +113,9 @@ catalog_before=$(for private_server in "$server" "$fleet_server" "$missing_serve
 done)
 TMUX= NW_FLEET= "$TVIEW" --list --json >"$stage/catalog.json"
 TMUX= NW_FLEET= "$TVIEW" --list >"$stage/catalog.txt"
+TMUX= NW_FLEET= "$stage/orc" tview -l -j >"$stage/short-catalog.json"
+cmp "$stage/catalog.json" "$stage/short-catalog.json" \
+  || fail "orc tview -l -j differs from tview --list --json"
 catalog_after=$(for private_server in "$server" "$fleet_server" "$missing_server"; do
   tmux -L "$private_server" list-sessions -F '#{session_name}|#{session_id}'
 done)
@@ -180,6 +186,12 @@ grep -q '|on$' <<<"$sessions" \
   || fail "primary window count changed"
 [[ $(tmux -L "$server" list-panes -a -F '#{pane_id}' | sort -u | wc -l) -eq 5 ]] \
   || fail "grouped views must share panes, not copy them"
+selected_windows=$(tmux -L "$server" list-sessions -F '#{session_name}|#{window_index}' \
+  | awk -F'|' '$1 ~ /^tview-/ {print $2}' | sort | tr '\n' ' ')
+[[ "$selected_windows" == '1 2 ' ]] \
+  || fail "simultaneous clients did not retain independent windows: $selected_windows"
+[[ $(tmux -L "$server" display-message -p -t '=0:' '#{window_index}') == 0 ]] \
+  || fail "viewer navigation changed the primary session's selected window"
 
 # The no-argument path above must still mean session 0. One positional
 # argument now always selects a window in that internal primary session,
@@ -226,11 +238,91 @@ if tmux -L "$fleet_server" list-sessions -F '#{session_name}' | grep -q '^tview-
   fail "no-argument tview leaked into the named fleet server"
 fi
 
+# Keep a regular tmux client attached while every short/long entry selects its
+# own window. Inspect the live client, rather than a possibly reused old view.
+mkfifo "$stage/observer-input"
+exec {observer_fd}<>"$stage/observer-input"
+TERM=xterm-256color timeout 60 script -qec \
+  "TMUX= $(command -v tmux) -L $server attach-session -t 0:0" /dev/null \
+  <"$stage/observer-input" >"$stage/observer.log" 2>&1 &
+observer_pid=$!
+observer_tty=
+for _ in {1..50}; do
+  observer_tty=$(tmux -L "$server" list-clients -F '#{client_tty}')
+  [[ -n "$observer_tty" ]] && break
+  sleep 0.1
+done
+[[ -n "$observer_tty" ]] || fail "observer client never attached"
+
+check_entry() {
+  local label=$1 expected_group=$2 expected_window=$3 command row tty session group window pid navigation_window
+  shift 3
+  printf -v command '%q ' "$@"
+  TERM=xterm-256color timeout 10 script -qec "TMUX= NW_FLEET= $command" /dev/null \
+    <"$stage/observer-input" >"$stage/$label.log" 2>&1 &
+  pid=$!
+  row=
+  for _ in {1..50}; do
+    row=$(tmux -L "$server" list-clients \
+      -F '#{client_tty}|#{session_name}|#{session_group}|#{window_index}' \
+      | awk -F'|' -v observer="$observer_tty" '$1 != observer')
+    [[ -n "$row" ]] && break
+    sleep 0.1
+  done
+  IFS='|' read -r tty session group window <<<"$row"
+  [[ "$session" == tview-* && "$group" == "$expected_group" \
+    && "$window" == "$expected_window" ]] \
+    || fail "$label selected the wrong live target: $row (see $stage/$label.log)"
+  # Navigate again after entry, with the ordinary tmux command on this view.
+  navigation_window=0
+  [[ "$window" != 0 ]] || navigation_window=5
+  tmux -L "$server" select-window -t "=$session:$navigation_window"
+  [[ $(tmux -L "$server" display-message -p -t "=$session:" '#{window_index}') == "$navigation_window" ]] \
+    || fail "$label could not navigate its own view"
+  [[ $(tmux -L "$server" list-clients -F '#{client_tty}|#{session_name}|#{window_index}' \
+    | awk -F'|' -v observer="$observer_tty" '$1 == observer {print $2 "|" $3}') == '0|0' ]] \
+    || fail "$label moved or detached the observer client"
+  tmux -L "$server" detach-client -t "$tty"
+  wait "$pid" || fail "$label exited nonzero (see $stage/$label.log)"
+}
+check_entry target-session alternate 0 "$TVIEW" -t alternate
+check_entry target-index alternate 5 "$TVIEW" -t alternate:5
+check_entry target-name alternate 5 "$TVIEW" --target alternate:alt-five
+check_entry short-flags alternate 5 "$TVIEW" -f alternate -w 5
+check_entry long-flags alternate 5 "$TVIEW" --fleet alternate --window alt-five
+check_entry current-window 0 2 "$TVIEW" -t :2
+check_entry numeric-session 0 2 "$TVIEW" -t 0:2
+check_entry default-alias 0 2 "$TVIEW" -t primary:two
+check_entry orc-target alternate 5 "$stage/orc" tview -t alternate:5
+check_entry orc-fleet alternate 5 "$stage/orc" --fleet alternate tview -w 5
+check_entry orc-long alternate 5 "$stage/orc" tview --fleet alternate --window 5
+tmux -L "$server" detach-client -t "$observer_tty"
+wait "$observer_pid" || fail "observer exited nonzero"
+exec {observer_fd}>&-
+
+reject_entry() {
+  local status=0 before after
+  before=$(tmux -L "$server" list-sessions -F '#{session_name}|#{window_index}')
+  TMUX= NW_FLEET= "$stage/orc" tview "$@" >"$stage/rejected.log" 2>&1 || status=$?
+  [[ $status == 2 ]] || fail "invalid arguments returned $status: $*"
+  after=$(tmux -L "$server" list-sessions -F '#{session_name}|#{window_index}')
+  [[ "$before" == "$after" ]] || fail "invalid arguments changed sessions: $*"
+}
+reject_entry -t
+reject_entry -t ''
+reject_entry -t :
+reject_entry -t alternate:5 -w 2
+reject_entry -w 2 -t alternate:5
+reject_entry -f default -t alternate
+reject_entry -t alternate -t default
+reject_entry -l -t alternate
+reject_entry -j
+
 # An explicit default selector can switch from an unrelated session group.
 # It selects the requested window in session 0's grouped view.
 cat >"$stage/same-server-command" <<EOF
 #!/usr/bin/env bash
-exec env TERM=xterm-256color NW_FLEET= $TVIEW --fleet default --window 1
+exec env TERM=xterm-256color NW_FLEET= "$stage/orc" tview -t default:1
 EOF
 chmod +x "$stage/same-server-command"
 cat >"$stage/unknown-command" <<EOF

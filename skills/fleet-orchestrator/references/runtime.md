@@ -113,12 +113,34 @@ Explicit legacy/network profiles keep their separately configured schedules.
 ### Finding and entering fleets
 
 ```bash
-tview --list
-tview --list --json
-tview --fleet default
-tview --fleet example 3
+tview -l
+tview -l -j
+tview -t default
+tview -t example:3
+tview -t example:editor
 tview 3
+orc tview -t example:3
 ```
+
+`tview` is the short entry; `orc tview` forwards the same arguments. Like
+`tmux attach -t SESSION:WINDOW` (or `tmux a -t SESSION:WINDOW`), `-t` selects a
+session and optionally a window index or exact window name. `-t SESSION` enters
+that session's view; `-t :WINDOW` selects a window in the current/default fleet.
+The session selector also accepts a configured fleet alias. Both short and
+long forms are supported: `-f`/`--fleet NAME`, `-w`/`--window WINDOW`, `-l`/`--list`,
+`-j`/`--json`, `-h`/`--help`; the long form of `-t` is `--target`.
+For example, `tview -f example -w 3` and
+`tview --fleet example --window 3` select the same target as `tview -t example:3`.
+`orc --fleet example tview -w 3` also preserves the explicit fleet.
+
+Ordinary `tmux a -t SESSION` clients share that session's current window.
+Tmux's native `new-session -t SESSION -s VIEW` creates a grouped session with
+the same windows and processes but an independent current window. Tview
+automates that native operation for each terminal and attaches to its view.
+Window navigation is independent; pane contents, input, window layout and
+processes remain shared. This is an interactive terminal, not tmux read-only
+mode. The `-t` spelling follows tmux; tview is not a pass-through for every
+tmux flag or target expression.
 
 The list derives ordinary local fleets from live tmux session groups and also
 includes the default configuration and existing explicit profiles. It distinguishes

@@ -487,7 +487,7 @@ esac
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertIn("created fleet profile", first.stdout)
         self.assertIn("validated existing fleet profile", second.stdout)
-        self.assertIn("attach with: tview --fleet gamma", first.stdout)
+        self.assertIn("attach with: tview -t gamma", first.stdout)
         path = self.profiles / "gamma.json"
         self.assertEqual(json.loads(path.read_text()), {
             "schema": 2,

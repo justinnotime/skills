@@ -15,9 +15,21 @@ fi
 usage() {
   cat <<'USAGE'
 Usage: tview [WINDOW]
-       tview --fleet NAME [WINDOW]
-       tview [--fleet NAME] --window WINDOW
-       tview --list [--json]
+       tview -t SESSION[:WINDOW]
+       tview [-f NAME] [-w WINDOW]
+       tview -l [-j]
+       orc tview [same options]
+
+  -t, --target SESSION[:WINDOW]  Select a session/fleet and optional window
+  -f, --fleet NAME               Select a fleet (long form remains supported)
+  -w, --window WINDOW            Select a window by index or exact name
+  -l, --list                     List available sessions/fleets
+  -j, --json                     Print the list as JSON
+  -h, --help                     Show this help
+
+Examples: tview -t work; tview -t work:3; tview -t work:editor; tview 3
+Like tmux attach -t, -t uses SESSION:WINDOW. Use -t :3 for window 3 in
+the current/default fleet. A session name or configured fleet alias is accepted.
 
 Attach through a persistent grouped view dedicated to this terminal. The view
 shares windows/processes with the primary session but keeps an independent
@@ -51,6 +63,7 @@ requested_window=
 window_set=0
 list_set=0
 json_set=0
+target_set=0
 positionals=()
 while (( $# )); do
   case "$1" in
@@ -58,7 +71,24 @@ while (( $# )); do
       usage
       exit 0
       ;;
-    --fleet)
+    -t|--target)
+      (( $# >= 2 )) || fail_usage "$1 needs SESSION[:WINDOW]"
+      (( target_set == 0 )) || fail_usage "--target may be given only once"
+      target_set=1
+      target_session=$2
+      target_window=
+      if [[ $2 == *:* ]]; then
+        target_session=${2%%:*}
+        target_window=${2#*:}
+      fi
+      [[ -n "$target_session" || -n "$target_window" ]] \
+        || fail_usage "target must include a session or window"
+      shift 2
+      # Reuse the existing selectors and their duplicate/conflict checks.
+      [[ -z "$target_window" ]] || set -- --window "$target_window" "$@"
+      [[ -z "$target_session" ]] || set -- --fleet "$target_session" "$@"
+      ;;
+    -f|--fleet)
       (( $# >= 2 )) || fail_usage "--fleet needs a name"
       (( fleet_set == 0 )) || fail_usage "--fleet may be given only once"
       fleet=$2
@@ -68,15 +98,15 @@ while (( $# )); do
     --session)
       fail_usage "--session was removed; choose a fleet and window only"
       ;;
-    --list)
+    -l|--list)
       list_set=1
       shift
       ;;
-    --json)
+    -j|--json)
       json_set=1
       shift
       ;;
-    --window)
+    -w|--window)
       (( $# >= 2 )) || fail_usage "--window needs an index or name"
       (( window_set == 0 )) || fail_usage "--window may be given only once"
       requested_window=$2

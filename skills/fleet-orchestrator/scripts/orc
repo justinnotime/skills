@@ -47,4 +47,8 @@ if [[ "${1:-}" == "--fleet" ]]; then
   selection=(--fleet "$2")
   shift 2
 fi
+if [[ "${1:-}" == "tview" ]]; then
+  shift
+  exec "$HERE/tview" "${selection[@]}" "$@"
+fi
 exec python3 "$PROFILE" exec-current "${selection[@]}" -- python3 "$HERE/fleet-orchestrator.py" "$@"

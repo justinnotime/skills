@@ -999,7 +999,7 @@ def create_session(name: str, env: Mapping[str, str] = os.environ) -> None:
             raise FleetProfileError(result.stderr.strip() or "cannot create tmux session")
     bind_local_session(name, env)
     print(f"ready tmux session {name!r}; fleet mapping is automatic")
-    print(f"attach with: tview --fleet {name}")
+    print(f"attach with: tview -t {name}")
 
 
 def session_action(action: str, name: str | None,
@@ -1139,7 +1139,7 @@ def terminal_inventory(env: Mapping[str, str] = os.environ) -> list[dict[str, st
         try:
             target = _terminal_target(name, env)
             row.update(target)
-            row["command"] = f"tview --fleet {target['name']}"
+            row["command"] = f"tview -t {target['name']}"
             try:
                 status, _ = _terminal_observation(target, env)
             except FleetProfileError as exc:
@@ -1341,7 +1341,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"ready fleet {args.name!r}: {session_status} primary tmux session "
                 f"{session!r} on server {server!r}"
             )
-            print(f"attach with: tview --fleet {args.name}")
+            print(f"attach with: tview -t {args.name}")
             return 0
         if args.action == "current":
             target = terminal_target()
