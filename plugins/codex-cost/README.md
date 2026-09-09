@@ -83,6 +83,23 @@ codex plugin remove codex-cost@skills
 Removal leaves existing tier snapshots on disk. This plugin does not change
 the user's native status-line selection.
 
+### Updating an active session
+
+With Codex CLI 0.153.4, reinstalling a plugin can remove its previous cached
+version while an already-running CLI process still holds the old hook path.
+If hooks start failing with exit code `127` after an update, check whether that
+old script path is missing. Exit the CLI and resume the same conversation to
+load the installed version:
+
+```sh
+codex resume YOUR_THREAD_ID
+```
+
+The conversation's usage records and totals are preserved. A successful manual
+run of the new plugin does not establish that an existing session has loaded it;
+confirm the next completed turn displays the cost message. Documentation-only
+source changes do not require reinstalling the plugin.
+
 ## Development
 
 From this plugin directory, run the synthetic accounting and hook tests without
