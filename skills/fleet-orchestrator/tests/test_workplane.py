@@ -588,6 +588,22 @@ class ReadOnlyCommandTests(StoreTestCase):
         finally:
             conn.close()
 
+    def test_show_includes_stored_review_evidence_without_changing_it(self):
+        receipt = "Artifact: reviewed commit abc123\nValidation: independent test log\nGaps: none"
+        conn = wp.connect_writable()
+        with conn:
+            did = wp.insert_task(conn, recipient="author", subject="reviewed work",
+                                 workflow="pr", owner_seat="author", reviewer_seat="reviewer")
+            for state in ("awaiting-review", "receipt-due", "merge-pending"):
+                conn.execute("UPDATE dispatch SET state=? WHERE id=?", (state, did))
+            conn.execute("UPDATE dispatch SET receipt_body=? WHERE id=?",
+                         (receipt, did))
+        conn.close()
+        before = self._dump()
+        output = self.run_cli(ORC, "show", did)
+        self.assertIn(receipt, output)
+        self.assertEqual(self._dump(), before)
+
     def test_observer_commands_leave_schema_and_rows_unchanged(self):
         conn = wp.connect_writable()
         with conn:
@@ -626,6 +642,34 @@ class ReadOnlyCommandTests(StoreTestCase):
             "SELECT 1 FROM sqlite_master WHERE type='trigger'"
             " AND name='dispatch_responsibility_version'").fetchone())
         check.close()
+
+    def test_scheduler_does_not_claim_prs_from_shared_github_account(self):
+        wp.connect_writable().close()
+        # The configured account and merge roles span multiple projects. A PR
+        # on that account is not evidence that this fleet owns the work.
+        stub = Path(self.env["NW_GH_CLI"])
+        calls = Path(self.tmp.name) / "github-calls"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            f"with open({str(calls)!r}, 'a') as log:\n"
+            "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:3] == ['pr', 'list']:\n"
+            "    print(json.dumps([{'number': 47, 'isDraft': False,\n"
+            "        'title': 'Work owned by a different fleet',\n"
+            "        'headRefName': 'feature/other-project',\n"
+            "        'headRefOid': 'abc123'}]))\n"
+            "else:\n"
+            "    print('[]')\n")
+        # Prove the fixture offers a real candidate before exercising the full
+        # scheduler. An empty or broken GitHub stub would hide the regression.
+        offered = subprocess.run(
+            [str(stub), "pr", "list"], text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(offered.stdout)[0]["number"], 47)
+        calls.unlink()
+        self.run_cli(ORC, "tick")
+        self.assertEqual(self.task_ids(), [])
+        self.assertFalse(calls.exists(), "an empty fleet must not scan GitHub")
 
     def test_board_doctor_and_dry_tick_do_not_reconcile_claims(self):
         conn = wp.connect_writable()
@@ -4537,7 +4581,7 @@ class CheckoutHygieneTests(StoreTestCase):
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
             "tick_checkout_hygiene", "tick_seat_liveness",
-            "tick_pr_autoregister", "tick_reviewer_rotation",
+            "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
                    for name in noops]
@@ -4608,7 +4652,7 @@ class CheckoutHygieneTests(StoreTestCase):
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
             "tick_checkout_hygiene", "tick_seat_liveness",
-            "tick_pr_autoregister", "tick_reviewer_rotation",
+            "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
                    for name in noops]
@@ -4691,7 +4735,7 @@ class CheckoutHygieneTests(StoreTestCase):
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
             "tick_checkout_hygiene", "tick_seat_liveness",
-            "tick_pr_autoregister", "tick_reviewer_rotation",
+            "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
                    for name in noops]
@@ -6232,42 +6276,6 @@ class ReviewPoolTests(StoreTestCase):
         self.assertEqual(orc.tick_reviewer_rotation(conn, dry=False), 0)
         self.assertEqual(wp.fetch(conn, did)["reviewer_seat"], "fixed-seat")
 
-    def test_autoregister_only_missing_nondraft_prs(self):
-        conn = wp.connect_writable()
-        self.grant_pool(conn)
-        orc = self.load_orc()
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":7,\"isDraft\":false,\"title\":\"seven\"},"
-            "{\"number\":8,\"isDraft\":true,\"title\":\"draft\"},"
-            "{\"number\":9,\"isDraft\":false,\"title\":\"nine\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        with conn:
-            wp.insert_task(conn, recipient="x", subject="pre-registered",
-                           workflow="pr", repo="example-app", owner_seat="x",
-                           reviewer_seat="y", links="example-app#7")
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            n = orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-
-
-        rows = conn.execute("SELECT links, reviewer_seat, deadline_ms, repo FROM"
-                            " dispatch WHERE links LIKE '%#9'").fetchall()
-        self.assertEqual(len(rows), len(wp.MERGE_KEYS))
-        for r in rows:
-            self.assertEqual(r["reviewer_seat"], "role:reviewer-pool")
-            self.assertGreater(r["deadline_ms"], 0)
-        again = orc.tick_pr_autoregister(conn, dry=False)
-
-        rows2 = conn.execute("SELECT COUNT(*) FROM dispatch WHERE links"
-                             " LIKE '%#9'").fetchone()[0]
-        self.assertEqual(rows2, len(wp.MERGE_KEYS))
-
 
 class ReviewFloorTests(StoreTestCase):
 
@@ -6282,120 +6290,10 @@ class ReviewFloorTests(StoreTestCase):
         spec.loader.exec_module(mod)
         return mod
 
-    def test_autoregister_dedupes_against_manual_tasks_without_links(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        with conn:
-            wp.insert_task(conn, recipient="x", subject="manual review of #7"
-                           " (opened by hand, no canonical link)",
-                           workflow="pr", repo="example-app", owner_seat="x",
-                           reviewer_seat="y")
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":7,\"isDraft\":false,\"title\":\"seven\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        n = conn.execute("SELECT COUNT(*) FROM dispatch WHERE workflow='pr'"
-                         " AND repo='example-app'").fetchone()[0]
-        self.assertEqual(n, 1)
-
-    def test_autoregister_dedupes_across_workflows(self):
+    def test_close_records_the_reviewed_head_for_history(self):
 
 
         conn = wp.connect_writable()
-        orc = self.load_orc()
-        with conn:
-            wp.insert_task(conn, recipient="tmux2",
-                           subject="review example-app PR (hand-opened)",
-                           links="example-app#7")
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":7,\"isDraft\":false,\"title\":\"seven\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        n = conn.execute("SELECT COUNT(*) FROM dispatch WHERE links LIKE"
-                         " '%example-app#7%'").fetchone()[0]
-        self.assertEqual(n, 1, "an open NON-pr task tracking the same"
-                         " repo#number blocks re-registration")
-
-    def _autoreg(self, conn, orc, prs_json: str) -> int:
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            f"  echo '{prs_json}'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            return orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-
-    def test_autoregister_dedupes_url_links_and_repo_less_tasks(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        with conn:
-            wp.insert_task(conn, recipient="tmux15", subject="drain cohort review",
-                           links="https://github.com/example-org/example-storage/pull/565")
-            wp.insert_task(conn, recipient="tmux14", subject="follow-up",
-                           body="context: example-org/example-app#58250 lands first")
-        self._autoreg(conn, orc,
-                      '[{"number":565,"isDraft":false,"title":"drain",'
-                      '"headRefOid":"abc"}]')
-        n = conn.execute("SELECT COUNT(*) FROM dispatch WHERE links='example-storage#565'"
-                         ).fetchone()[0]
-        self.assertEqual(n, 0, "a URL link on a repo-less task covers example-storage#565")
-        refs = orc.pr_refs(conn.execute(
-            "SELECT * FROM dispatch WHERE recipient='tmux14'").fetchone())
-        self.assertEqual(refs, {"example-app#58250"}, "owner/repo#n in a body counts")
-
-    def test_autoregister_closed_task_covers_the_same_head_only(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        with conn:
-            did = wp.insert_task(conn, recipient="x", subject="review example-app#7: seven",
-                                 workflow="pr", repo="example-app", owner_seat="x",
-                                 reviewer_seat="y", links="example-app#7")
-            conn.execute("UPDATE dispatch SET state='closed', resolution='superseded',"
-                         " progress_hash=? WHERE id=?",
-                         (wp.content_hash("deadbeef\n"), did))
-        same = ('[{"number":7,"isDraft":false,"title":"seven",'
-                '"headRefOid":"deadbeef"}]')
-        self._autoreg(conn, orc, same)
-        count = lambda: conn.execute(
-            "SELECT COUNT(*) FROM dispatch WHERE links='example-app#7'").fetchone()[0]
-        self.assertEqual(count(), 1, "a task closed at the PR's current head covers it")
-        moved = ('[{"number":7,"isDraft":false,"title":"seven",'
-                 '"headRefOid":"feedface"}]')
-        self._autoreg(conn, orc, moved)
-        self.assertEqual(count(), 2, "new commits after the closure need ONE fresh task")
-        self._autoreg(conn, orc, moved)
-        self.assertEqual(count(), 2, "and exactly one")
-
-    def test_close_records_the_head_so_a_superseded_review_covers_its_pr(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
         with conn:
             did = wp.insert_task(conn, recipient="x", subject="review example-app#7: seven",
                                  workflow="pr", repo="example-app", owner_seat="x",
@@ -6409,39 +6307,6 @@ class ReviewFloorTests(StoreTestCase):
         self.assertEqual(row["state"], "closed")
         self.assertEqual(row["progress_hash"], wp.content_hash("deadbeef\n"),
                          "close ran the check once and kept the head")
-        same = ('[{"number":7,"isDraft":false,"title":"seven",'
-                '"headRefOid":"deadbeef"}]')
-        self._autoreg(conn, orc, same)
-        n = conn.execute("SELECT COUNT(*) FROM dispatch WHERE links='example-app#7'"
-                         ).fetchone()[0]
-        self.assertEqual(n, 1, "no re-mint for a PR superseded at this head")
-
-    def test_unowned_pr_falls_to_the_repo_default_recipient(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        defaults = Path(self.tmp.name) / "pr-owner-defaults.json"
-        defaults.write_text('{"example-storage": "role:line-owner-of-example-storage"}')
-        orc.PR_OWNER_DEFAULTS_FILE = defaults
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":7,\"isDraft\":false,\"title\":\"seven\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        rows = {r["repo"]: r["recipient"] for r in conn.execute(
-            "SELECT repo, recipient FROM dispatch WHERE workflow='pr'")}
-        self.assertEqual(rows.get("example-storage"), "role:line-owner-of-example-storage",
-                         "mapped repo routes to its line role")
-        self.assertEqual(rows.get("example-app"), "role:commander",
-                         "unmapped repo keeps the commander default")
 
     def _pr_at_review(self):
         self.run_cli(ORC, "open", "--to", "tmux1", "--subject", "floor pr",
@@ -6484,128 +6349,8 @@ class ReviewFloorTests(StoreTestCase):
             src.count("<findings or PR-review link>"), 3)
 
 
-class OwnerDetectTests(StoreTestCase):
+class ReassignAuditTests(StoreTestCase):
 
-
-    def load_orc(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "orc_for_owner_tests", ROOT / "scripts" / "fleet-orchestrator.py")
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        sys.modules[spec.name] = mod
-        spec.loader.exec_module(mod)
-        return mod
-
-    def seed_seat(self, conn, agent_id, window):
-        import socket
-        host = socket.gethostname().split(".", 1)[0]
-        with conn:
-            conn.execute("INSERT INTO seat (agent_id, handle, aliases, host,"
-                         " tmux, status, addressable, updated_at, refreshed_ms) VALUES"
-                         " (?,?,'',?,?,'active',1,'',0)",
-                         (agent_id, f"example-host/{agent_id}-tmux{window}", host,
-                          f"tmux=0:{window}.0 win=claude"))
-
-    def test_unique_titled_window_resolves_owner(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "seat-a", "5")
-        titles = [("5", "w5 PR #123 fair-share"), ("6", "worker idle")]
-        self.assertEqual(orc.owner_from_window_titles(conn, 123, titles),
-                         "seat-a")
-
-    def test_ambiguous_or_absent_titles_park_on_commander(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "seat-a", "5")
-        self.seed_seat(conn, "seat-b", "6")
-        two = [("5", "PR #123"), ("6", "also PR #123")]
-        self.assertIsNone(orc.owner_from_window_titles(conn, 123, two))
-        none = [("5", "unrelated"), ("6", "PR #999")]
-        self.assertIsNone(orc.owner_from_window_titles(conn, 123, none))
-
-        near = [("5", "PR #1234")]
-        self.assertIsNone(orc.owner_from_window_titles(conn, 123, near))
-
-    def test_branch_convention_resolves_owner(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "seat-la", "21")
-        self.assertEqual(
-            orc.owner_from_branch(conn, "agent/tmux21-crash-billing-flake"),
-            "seat-la")
-
-    def test_branch_convention_is_shape_precise(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "seat-la", "21")
-        for ref in ("fix/tmux-cleanup", "agent/tmuxX-y", "feature/agent/tmux21-x",
-                    "release/example-dependency-9", "agent/tmux21", "", None):
-            self.assertIsNone(orc.owner_from_branch(conn, ref), ref)
-
-    def test_branch_convention_needs_a_registered_local_seat(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.assertIsNone(orc.owner_from_branch(conn, "agent/tmux21-x"))
-
-    def test_autoregister_uses_branch_owner_when_titles_are_silent(self):
-
-
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "seat-la", "5")
-        stub = Path(self.tmp.name) / "gh-branch.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":9,\"isDraft\":false,\"title\":\"la work\","
-            "\"headRefName\":\"agent/tmux5-fair-share\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        rows = conn.execute("SELECT owner_seat, body FROM dispatch"
-                            " WHERE workflow='pr'").fetchall()
-        self.assertTrue(any(r["owner_seat"] == "seat-la" for r in rows),
-                        [dict(r) for r in rows])
-        self.assertTrue(any("branch convention" in (r["body"] or "")
-                            for r in rows))
-
-    def test_autoregister_ignores_cached_owner_when_registry_is_stale(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        self.seed_seat(conn, "departed-seat", "7")
-        defaults = Path(self.tmp.name) / "pr-owner-defaults.json"
-        defaults.write_text('{"example-app": "role:commander"}')
-        orc.PR_OWNER_DEFAULTS_FILE = defaults
-        stub = Path(self.tmp.name) / "gh-stale-owner.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":9,\"isDraft\":false,\"title\":\"PR #9\","
-            "\"headRefName\":\"agent/tmux7-work\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(
-                conn, dry=False, registry_fresh=False,
-            )
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        rows = conn.execute(
-            "SELECT owner_seat,body FROM dispatch WHERE workflow='pr'",
-        ).fetchall()
-        self.assertTrue(rows)
-        self.assertFalse(any(r["owner_seat"] == "departed-seat" for r in rows))
-        self.assertTrue(any(r["owner_seat"] == "role:commander" for r in rows))
-        self.assertTrue(any("no stored membership was used" in r["body"] for r in rows))
 
     def test_reassign_verb_audits_and_clears_pool_rotation(self):
         conn = wp.connect_writable()
@@ -6894,44 +6639,6 @@ class ReassignPoolPinTests(StoreTestCase):
         row = wp.fetch(conn, did)
         self.assertEqual(row["reviewer_seat"], "picked-seat")
         self.assertEqual(row["reviewer_pool"], "")
-
-
-class AutoregExclusionTests(StoreTestCase):
-    def test_team_brain_pin_shapes_are_skipped(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "orc_for_excl_tests", ROOT / "scripts" / "fleet-orchestrator.py")
-        orc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(orc)
-        self.assertTrue(orc.autoreg_excluded(
-            {"title": "chore(example-dependency): pin example-memory v1.2.3",
-             "headRefName": "whatever"}))
-        self.assertTrue(orc.autoreg_excluded(
-            {"title": "bump things", "headRefName": "release/example-dependency-42"}))
-        self.assertFalse(orc.autoreg_excluded(
-            {"title": "fix: fair-share regression",
-             "headRefName": "fix/fair-share"}))
-        conn = wp.connect_writable()
-        stub = Path(self.tmp.name) / "fake-gh.sh"
-        stub.write_text(
-            "#!/usr/bin/env bash\n"
-            "if [ \"$2\" = list ]; then\n"
-            "  echo '[{\"number\":1,\"isDraft\":false,"
-            "\"title\":\"chore(example-dependency): pin example-memory v9\","
-            "\"headRefName\":\"release/example-dependency-9\"},"
-            "{\"number\":2,\"isDraft\":false,\"title\":\"real work\","
-            "\"headRefName\":\"feat/real\"}]'\n"
-            "else echo ok; fi\n")
-        stub.chmod(0o755)
-        os.environ["NW_GH_CLI"] = str(stub)
-        try:
-            orc.tick_pr_autoregister(conn, dry=False)
-        finally:
-            os.environ.pop("NW_GH_CLI", None)
-        links = [r["links"] for r in conn.execute(
-            "SELECT links FROM dispatch WHERE workflow='pr'")]
-        self.assertTrue(all("#2" in l for l in links), links)
-        self.assertFalse(any("#1" in l for l in links), links)
 
 
 class DoneGuardCoverageTests(StoreTestCase):
@@ -7321,7 +7028,7 @@ class HandshakeTests(StoreTestCase):
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
             "tick_checkout_hygiene", "tick_seat_liveness",
-            "tick_pr_autoregister", "tick_reviewer_rotation",
+            "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
                    for name in noops]

@@ -25,8 +25,12 @@ and `view [WINDOW]`; maintenance is under `admin`. `orc -t NAME` is the short
 fleet selector. Board supports `--view table|columns|summary` and `--json` from
 the same read-only work selection. Goal history requires `goals --all` or an
 explicit goal ID. `orc fleet NAME view WINDOW` enters the same windows as
-`tview -t NAME:WINDOW`. Help presents this hierarchy; older spellings remain
-compatible forwards. Neither listing nor viewing saved work creates databases.
+`tview -t NAME:WINDOW`. `orc --help` lists every command by purpose with a short
+description. Use `orc help task` or `orc fleet NAME task --help` for workflow
+relationships, then `orc fleet NAME task open --help` for exact arguments.
+`orc help legacy` maps old flat spellings to the grouped commands. Unknown
+commands show the same grouped help. Neither help nor viewing saved work
+creates databases.
 
 Read `FLEET_ORCHESTRATOR_PROFILE`, or
 `${XDG_CONFIG_HOME:-$HOME/.config}/fleet-orchestrator/profile.md`, when present,
@@ -74,7 +78,7 @@ to that command and its descendants, not later unrelated commands.
 Use one caller-configured `orc admin tick` schedule for the default fleet and
 live local fleets with saved task databases. It discovers groups each time,
 uses existing per-store engine locks and isolates failures. Local fleets do not
-inherit the default fleet's global project import or repository patrol. Starting
+inherit the default fleet's repository patrol. Starting
 a fleet needs no separate cron entry. The machine must have this one schedule
 configured; explicit legacy/network profiles retain their caller-owned schedules.
 
@@ -97,6 +101,12 @@ incidental window numbers. Reuse an existing task when it represents the same
 work. Record the requested outcome, its dependencies and a check that exercises
 the deliverable itself. A count of files, matching titles or passing placeholder
 command does not prove the requested behavior works.
+
+Register PR work explicitly in its owning fleet with `orc fleet NAME task open`
+or `task dispatch`, using `--workflow pr`, the repository, author, reviewer and
+PR link. The scheduler advances recorded tasks; it does not discover and create
+tasks from a GitHub account's open PRs. A shared account, repository, merge role,
+branch name or window title does not establish which fleet owns a PR.
 
 Treat dispatch acceptance, recipient presentation, explicit task acceptance and
 completion as separate facts. Follow the consumer's durable workflow so failed

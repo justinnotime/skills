@@ -44,8 +44,7 @@ Optional fields:
 | `bus.dispatcher_template`, `bus.named_dispatcher_template` | Caller-owned service template for an explicitly requested Matrix dispatcher install |
 | `authority.merge_keys` | Repository-to-responsible-role mapping; unspecified repositories route to the operator |
 | `authority.service_handle`, `authority.receipt_instructions` | Caller identity and review instructions |
-| `github.owner`, `github.owner_defaults_file`, `github.sanctioned_logins_file` | GitHub selection and private responsibility mappings |
-| `github.excluded_title_prefixes`, `github.excluded_branch_prefixes`, `github.owner_branch_pattern` | Explicit automatic-registration filters and branch identity pattern |
+| `github.owner`, `github.sanctioned_logins_file` | GitHub selection and recognized review authors for already registered tasks |
 | `github.whole_repositories`, `github.mixed_repositories`, `github.path_substrings` | Review-inspection scope |
 | `github.automatic_review_markers` | Comments excluded from substantive review evidence |
 | `watched_repositories` | List of objects containing `path`, `kind` (`checkout` or `bare-hub`), and optional `exempt` paths |
@@ -62,6 +61,12 @@ Existing `NW_*`, `AGENT_BUS_*`, `MATRIX_BUS_*`, `NOTES_RUNTIME_DIR`, and
 not require a particular repository. Named profile commands apply their complete
 environment before importing runtime code; keep the same selector throughout
 an operation.
+
+PRs must be registered explicitly in their owning fleet. The former
+`github.owner_defaults_file`, `github.excluded_title_prefixes`,
+`github.excluded_branch_prefixes`, and `github.owner_branch_pattern` settings
+are unused and can be removed. Merge authority and the read-only review
+inspection scope do not create tasks.
 
 The default alias uses the same name syntax as named fleets and cannot collide
 with a named profile. Both `--fleet default` and `--fleet <default_name>` select

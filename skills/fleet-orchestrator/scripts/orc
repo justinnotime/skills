@@ -13,13 +13,79 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 HERE = Path(__file__).resolve().parent
 
 GROUPS = {
-    "task": ("list", "open", "dispatch", "show", "ack", "note", "blocked",
-             "reassign", "claim-done", "close", "chase", "link", "handshake", "announce"),
-    "goal": ("list", "show", "open", "team"),
-    "agent": ("list", "onboard", "checkout", "role", "pane-succession"),
-    "review": ("verdict", "receipt"),
-    "admin": ("doctor", "verify", "snapshot", "tick", "overdue", "import-state", "config"),
+    "task": {
+        "list": "List tasks; --all includes closed work",
+        "show": "Read one task and its full history",
+        "brief": "Read work waiting for the operator, with full request text",
+        "open": "Record a task without sending it to its recipient",
+        "dispatch": "Record a task and send it to its recipient",
+        "ack": "Acknowledge and accept a task",
+        "note": "Record progress without claiming completion",
+        "blocked": "Record what decision is needed and who must make it",
+        "reassign": "Change the recipient, PR author or reviewer",
+        "claim-done": "Request independent completion review; does not close the task",
+        "close": "Close with a resolution after the required verification",
+        "chase": "Record a follow-up and schedule another check",
+        "link": "Connect tasks with a dependency or other typed relationship",
+        "handshake": "Wait for message presentation or task-response evidence",
+        "announce": "Send an announcement to selected recipients",
+    },
+    "review": {
+        "verdict": "Reviewer records blockers or a clean review",
+        "receipt": "PR author records verification evidence for the merge decision",
+    },
+    "goal": {
+        "list": "List current goals and their dependencies",
+        "show": "Read one goal and its child tasks, including history",
+        "open": "Create a parent goal for related tasks",
+        "team": "Add or list the people assigned to one goal",
+    },
+    "agent": {
+        "list": "List registered members and their terminal windows",
+        "onboard": "Read an agent's tasks, roles and predecessor handoff",
+        "role": "Grant, revoke or list fleet responsibilities",
+        "topology": "Inspect current agents, panes, roles and registration gaps",
+        "checkout": "Write a handoff and retire an agent after obligations clear",
+        "pane-succession": "Retire an absent predecessor with no outstanding obligations",
+    },
+    "admin": {
+        "doctor": "Diagnose task consistency and scheduler freshness",
+        "verify": "Verify stored task relationships and event history",
+        "snapshot": "Write a backup of the task database",
+        "tick": "Run scheduled checks and reminders; --dry-run only inspects",
+        "overdue": "List tasks due for a check; --run-checks executes their checks",
+        "import-state": "Import historical state from the former scheduler",
+        "config": "Inspect the selected fleet's resolved runtime configuration",
+    },
 }
+WORKFLOWS = {
+    "task": "Work: open -> ack -> note -> claim-done -> independent verification -> close.\n"
+            "Use dispatch instead of open when the recipient must also be notified.\n"
+            "blocked and reassign handle a missing decision or a change of responsibility.",
+    "review": "PR work: task open/dispatch --workflow pr -> readiness check -> review verdict.\n"
+              "Blockers return work to the author; a clean verdict requires review receipt.\n"
+              "A receipt supplies evidence, never merge permission.",
+    "goal": "A goal is a parent task. Attach work with task open --parent GOAL_ID.\n"
+            "A goal team role overrides the same fleet role for that goal's tasks;\n"
+            "task link records dependencies.",
+    "agent": "agent role assigns a fleet responsibility; goal team assigns people to one goal.\n"
+             "onboard reads existing registration. Join from the actual agent pane with\n"
+             f"{HERE / 'agent-boot.sh'} TASK_SLUG.\n"
+             f"Joining procedure: {HERE.parent / 'references/agent-bus.md'} "
+             "(Join the current session).",
+    "admin": "The configured scheduler owns real ticks. Use tick --dry-run for inspection.\n"
+             "Unselected 'orc admin tick' covers configured fleets; a named fleet limits it.",
+}
+LEGACY_COMMANDS = {}
+for _group, _commands in GROUPS.items():
+    for _command in _commands:
+        if _command != "config":
+            LEGACY_COMMANDS.setdefault(_command, f"{_group} {_command}")
+LEGACY_COMMANDS.update({
+    "tree": "goal list (or goal show ID)",
+    "statusline": "board --view summary",
+    "kanban": "board --view columns",
+})
 LEGACY_LIFECYCLE = {"create": "create", "start": "create", "stop": "stop",
                     "window": "window", "rename": "rename", "show": "resolve",
                     "apply-tmux": "apply-tmux"}
@@ -31,35 +97,71 @@ def run_script(name, args, *, env=None):
     os.execvpe(command[0], [*command, *args], os.environ if env is None else env)
 
 
-def root_help():
+def group_help(name, prefix, *, file=None):
+    print(f"Usage: {prefix} {name} COMMAND [OPTIONS]", file=file)
+    print(file=file)
+    for command, description in GROUPS[name].items():
+        print(f"  {name + ' ' + command:<24} {description}", file=file)
+    print(f"\n{WORKFLOWS[name]}", file=file)
+    print(f"\nUse '{prefix} {name} COMMAND --help' for arguments.", file=file)
+
+
+def root_help(prefix="orc", *, file=None):
     print("""Usage: orc                         List fleets and their work
        orc fleet NAME              Show one fleet's work
        orc fleet NAME COMMAND      Work inside that fleet
        orc -t NAME COMMAND         Short fleet selector, like tview -t
-       orc admin tick              Run the configured fleet scheduler
+       orc help [GROUP|legacy]      Explain a command group or old spellings
 
-Fleet commands:
-  board       Current work; --view table|columns|summary, --json, --repo
-  goals       Current goals; --all includes closed history
-  task        Create, inspect and update tasks
-  agents      Members and their terminal windows
-  review      Review verdicts and evidence
-  view [WIN]  Enter the same windows as tview -t NAME[:WIN]
-  start       Create or resume this fleet
-  window      Add a terminal window
-  rename NEW  Rename this fleet while preserving saved work
-  stop        Stop its terminals and retain saved work
-  admin       Diagnostics and maintenance for this fleet
+Read work:
+  overview                 Current goals and work in the selected fleet
+  board                    Work table; --view table|columns|summary, --json, --repo
+  goals                    Short form of goal list; --all includes history
+  agents                   Short form of agent list
 
-Use 'orc fleet NAME COMMAND --help' for command arguments.
+Fleet terminals:
+  view [WIN]               Enter the same windows as tview -t NAME[:WIN]
+  start                    Create or resume this fleet
+  window                   Add a terminal window
+  rename NEW               Rename this fleet while preserving saved work
+  stop                     Stop its terminals and retain saved work""", file=file)
+    for group, commands in GROUPS.items():
+        print(f"\n{group.title()} commands:", file=file)
+        for command, description in commands.items():
+            print(f"  {group + ' ' + command:<24} {description}", file=file)
+    print(f"""
+Typical work: task open -> task ack -> task note -> task claim-done -> verification -> task close.
+PR review: task dispatch --workflow pr -> readiness -> review verdict -> review receipt.
+A receipt records evidence; merging requires its own authority.
+
+Use '{prefix} GROUP --help' for relationships and '{prefix} GROUP COMMAND --help' for arguments.
+Use '{prefix} help legacy' to map old flat commands to these groups.
 A leading --config FILE selects private runtime settings.
 Without an explicit selector, a command follows its actual tmux fleet.
-Legacy commands remain supported for existing scripts.""")
+Unselected 'orc admin tick' runs the configured fleet scheduler; add a fleet to limit it.""", file=file)
 
 
-def group_help(name, prefix):
-    print(f"Usage: {prefix} {name} {{{','.join(GROUPS[name])}}} ...")
-    print(f"Use '{prefix} {name} COMMAND --help' for arguments.")
+def legacy_help(prefix):
+    print("Old spellings remain supported; use grouped commands for new work.\n")
+    for command, target in LEGACY_COMMANDS.items():
+        print(f"  {command:<18} {prefix} {target}")
+    print("\nFor legacy tick's single-fleet behavior, use 'orc fleet NAME admin tick'.")
+    print("overview, board, agents and fleet terminal commands remain direct entries.")
+
+
+def requested_help(args, prefix):
+    if not args or args in (["--help"], ["-h"], ["fleet"]):
+        root_help(prefix)
+        return 0
+    if args == ["legacy"]:
+        legacy_help(prefix)
+        return 0
+    if len(args) == 1 and args[0] in GROUPS:
+        group_help(args[0], prefix)
+        return 0
+    print(f"orc: unknown help topic {' '.join(args)!r}\n", file=sys.stderr)
+    root_help(prefix, file=sys.stderr)
+    return 2
 
 
 def inventory(profile, args):
@@ -119,9 +221,12 @@ def main():
             selected = value
         else:
             raise ValueError("select a fleet only once")
+    prefix = f"orc fleet {selected}" if selected else "orc"
     if args in (["--help"], ["-h"]):
-        root_help()
+        root_help(prefix)
         return 0
+    if args[:1] == ["help"]:
+        return requested_help(args[1:], prefix)
     # Load after --config, so every selector sees exactly the same settings.
     sys.path.insert(0, str(HERE / "lib"))
     spec = importlib.util.spec_from_file_location("orc_fleet_profile", HERE / "lib/fleet-profile.py")
@@ -145,9 +250,12 @@ def main():
             selected, args = args[0], args[1:]
         if selected is None and (not args or args == ["--json"]):
             return inventory(profile, args)
+        prefix = f"orc fleet {selected}" if selected else "orc"
         if args in (["--help"], ["-h"]):
-            root_help()
+            root_help(prefix)
             return 0
+        if args[:1] == ["help"]:
+            return requested_help(args[1:], prefix)
         if args[:2] == ["admin", "tick"] and selected is None:
             run_script("fleet-tick.py", args[2:])
         if args and args[0] in {"tview", "view"}:
@@ -175,7 +283,9 @@ def main():
             action, tail = rest[0], rest[1:]
             os.environ["ORC_CLI_COMMAND"] = action
             if action not in GROUPS[group]:
-                raise ValueError(f"unknown {group} command {action!r}; use {prefix} {group} --help")
+                print(f"orc: unknown {group} command {action!r}\n", file=sys.stderr)
+                group_help(group, prefix, file=sys.stderr)
+                return 2
             prefix += " " + group
             if group == "goal":
                 action = {"list": "tree", "show": "tree"}.get(action, action)
@@ -188,6 +298,10 @@ def main():
             elif group == "admin" and action == "config":
                 run_script("lib/fleet-profile.py", ["resolve", selected or profile.command_selection(), *tail])
             args = [action, *tail]
+        elif args[0] not in {"overview", "board", *LEGACY_COMMANDS}:
+            print(f"orc: unknown command {args[0]!r}\n", file=sys.stderr)
+            root_help(prefix, file=sys.stderr)
+            return 2
         os.environ["ORC_CLI_PROG"] = prefix
         flags = ["--fleet", selected] if selected is not None else []
         run_script("lib/fleet-profile.py", ["exec-current", *flags, "--", sys.executable,

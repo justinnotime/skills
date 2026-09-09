@@ -8,12 +8,6 @@
     "service_handle": "example-host/fleet-orchestrator-cron"
   },
   "github": {
-    "owner": "example-org",
-    "excluded_title_prefixes": [
-      "chore(example-dependency): pin"
-    ],
-    "excluded_branch_prefixes": [
-      "release/example-dependency-"
-    ]
+    "owner": "example-org"
   }
 }

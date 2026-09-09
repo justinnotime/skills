@@ -116,8 +116,7 @@ def cmd_close(args: argparse.Namespace) -> int:
         _verdict, closing_hash = wp.run_progress(row["check_cmd"])
         if not closing_hash:
             print("NOTE  the task's check did not answer, so no head is recorded"
-                  " at closure; if its PR is still open the auto-registrar may"
-                  " open one fresh review task for it")
+                  " at closure")
     with conn:
         conn.execute(
             "UPDATE dispatch SET state=?, resolution=?, ask_flag=0,"
@@ -425,6 +424,9 @@ def cmd_show(args: argparse.Namespace) -> int:
     if row["body"]:
         print("body ---")
         print(row["body"])
+    if row["receipt_body"]:
+        print("receipt (stored; verify the current artifact) ---")
+        print(row["receipt_body"])
     intents = wp.open_review_intents(conn, row["id"])
     if intents:
         print("review intents (open) ---")
