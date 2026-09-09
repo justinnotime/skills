@@ -588,6 +588,22 @@ class ReadOnlyCommandTests(StoreTestCase):
         finally:
             conn.close()
 
+    def test_show_includes_stored_review_evidence_without_changing_it(self):
+        receipt = "Artifact: reviewed commit abc123\nValidation: independent test log\nGaps: none"
+        conn = wp.connect_writable()
+        with conn:
+            did = wp.insert_task(conn, recipient="author", subject="reviewed work",
+                                 workflow="pr", owner_seat="author", reviewer_seat="reviewer")
+            for state in ("awaiting-review", "receipt-due", "merge-pending"):
+                conn.execute("UPDATE dispatch SET state=? WHERE id=?", (state, did))
+            conn.execute("UPDATE dispatch SET receipt_body=? WHERE id=?",
+                         (receipt, did))
+        conn.close()
+        before = self._dump()
+        output = self.run_cli(ORC, "show", did)
+        self.assertIn(receipt, output)
+        self.assertEqual(self._dump(), before)
+
     def test_observer_commands_leave_schema_and_rows_unchanged(self):
         conn = wp.connect_writable()
         with conn:

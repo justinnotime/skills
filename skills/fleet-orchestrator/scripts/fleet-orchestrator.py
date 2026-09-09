@@ -3810,30 +3810,55 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     def add_open_args(p, dispatchable=False):
+        goal_help = parser.prog.endswith(" goal")
+        p.description = ("Create a parent goal. Attach child tasks with task open --parent ID."
+                         if goal_help else
+                         "Record work" + (" and send it to its recipient." if dispatchable
+                                          else " without sending it to its recipient."))
+        p.epilog = (
+            "Checks run as shell commands on the machine running ORC, in that process's "
+            "working directory, including scheduled checks. They do not run in the "
+            "recipient's terminal and --repo does not change directory. Use absolute "
+            "paths or an explicit cd; required tools and credentials must be available there."
+        ) if not goal_help else None
         p.add_argument("--await", dest="await_notify", action="store_true",
                        help="notify MY seat once when this task reaches its"
                             " terminal state (opt-in; requires a resolvable"
                             " seat identity)")
         p.add_argument("--to", required=True,
-                       help="recipient: bus handle, role:<name>, or tmux<N>")
-        p.add_argument("--subject", required=True)
-        p.add_argument("--body")
-        p.add_argument("--body-file")
-        p.add_argument("--check", help="progress command (canonicalized + hashed)")
-        p.add_argument("--no-check", action="store_true")
-        p.add_argument("--after", default=wp.DEFAULT_AFTER)
-        p.add_argument("--link", action="append")
+                       help="recipient: bus handle, role:<name>, or tmux<N>;"
+                            + (" PR dispatch requires the same value as --owner"
+                               if dispatchable else " owns the requested work"))
+        p.add_argument("--subject", required=True, help="short description of the requested result")
+        p.add_argument("--body", help="request and acceptance conditions; required for operator tasks")
+        p.add_argument("--body-file", help="read the request from this UTF-8 file instead of --body")
+        p.add_argument("--check", help="ordinary tasks require this or --no-check; exit 0 stdout"
+                       " is compared for progress. For PRs print the current head SHA;"
+                       " omission disables automatic re-review on head changes")
+        p.add_argument("--no-check", action="store_true",
+                       help="ordinary task has no automated progress check; explain why in --body")
+        p.add_argument("--after", default=wp.DEFAULT_AFTER,
+                       help="next check delay, e.g. 45m, 2h, 1d (default: %(default)s)")
+        p.add_argument("--link", action="append", help="related PR, issue or evidence URL; repeatable")
         p.add_argument("--workflow", default="dispatch",
-                       choices=sorted(wp.WORKFLOWS))
+                       choices=sorted(wp.WORKFLOWS),
+                       help=argparse.SUPPRESS if goal_help else
+                       "task lifecycle (default: %(default)s); pr requires --owner and --reviewer")
         p.add_argument("--parent", help="parent goal task id")
         p.add_argument("--repo", default="",
-                       help="repo for the merge-key map (pr workflow)")
-        p.add_argument("--owner", default="", help="owner seat (pr workflow)")
-        p.add_argument("--reviewer", default="", help="reviewer seat (pr workflow)")
+                       help="repository name for filtering and PR merge-decision routing; not a directory")
+        p.add_argument("--owner", default="", help=argparse.SUPPRESS if goal_help else
+                       "required for PR work: author identity")
+        p.add_argument("--reviewer", default="", help=argparse.SUPPRESS if goal_help else
+                       "required for PR work: independent reviewer identity or role")
         p.add_argument("--ready-cmd", default="",
-                       help="readiness predicate, exit 0 = ready (pr workflow)")
+                       help=argparse.SUPPRESS if goal_help else
+                       "PR readiness check: exit 0 hands work to the reviewer;"
+                       " omission disables automatic review handoff")
         p.add_argument("--done-cmd", default="",
-                       help="done predicate, exit 0 = merged (pr workflow)")
+                       help=argparse.SUPPRESS if goal_help else
+                       "PR merge check: exit 0 means actually merged and closes the task;"
+                       " omission disables automatic merge closure")
         p.add_argument("--needs", action="append", metavar="TASK-ID",
                        help="predecessor task id, repeatable: this task waits"
                             " unnotified until every predecessor closes")
@@ -3863,22 +3888,34 @@ def main() -> int:
     p.set_defaults(func=cmd_dispatch)
 
     p = sub.add_parser("handshake", help="wait for durable acknowledgement or"
-                                         " Agent Bus inbox presentation")
-    p.add_argument("id")
-    p.add_argument("--timeout", type=int, default=HANDSHAKE_TIMEOUT_S)
+                                         " Agent Bus inbox presentation",
+                       description="Wait for durable message presentation or task-response evidence."
+                       " Presentation alone can succeed; this does not prove explicit acceptance,"
+                       " progress or completion. The recipient uses task ack to accept;"
+                       " inspect task show for the recorded evidence.")
+    p.add_argument("id", help="dispatched task ID")
+    p.add_argument("--timeout", type=int, default=HANDSHAKE_TIMEOUT_S,
+                   help="maximum seconds to wait (default: %(default)s)")
     p.set_defaults(func=cmd_handshake)
 
-    p = sub.add_parser("verdict", help="seat verb: review verdict")
-    p.add_argument("id")
-    p.add_argument("verdict", choices=("blockers", "clean"))
-    p.add_argument("--link", action="append")
-    p.add_argument("--note")
+    p = sub.add_parser("verdict", help="seat verb: review verdict",
+                       description="The current PR reviewer records findings after the task"
+                       " becomes ready for review. Blockers return work to the author;"
+                       " clean requests the author's receipt.")
+    p.add_argument("id", help="PR task ID")
+    p.add_argument("verdict", choices=("blockers", "clean"), help="review outcome")
+    p.add_argument("--link", action="append", help="additional evidence URL; does not replace --note")
+    p.add_argument("--note", help="required: findings or a pointer, e.g. 'Reviewed SHA: PR review URL'")
     p.set_defaults(func=cmd_verdict)
 
-    p = sub.add_parser("receipt", help="seat verb: record the owner review evidence")
-    p.add_argument("id")
-    p.add_argument("--body")
-    p.add_argument("--body-file")
+    p = sub.add_parser("receipt", help="seat verb: record the owner review evidence",
+                       description="After a clean verdict, the PR author records verification"
+                       " evidence required by project policy. Moves the task to merge-pending"
+                       " and supplies the configured decision maker with evidence, not merge permission."
+                       " Read the stored evidence with task show ID.")
+    p.add_argument("id", help="PR task ID")
+    p.add_argument("--body", help="required unless --body-file is supplied: nonempty verification evidence")
+    p.add_argument("--body-file", help="read evidence from a UTF-8 file instead of --body")
     p.set_defaults(func=cmd_receipt)
 
     p = sub.add_parser("blocked", help="seat verb: blocked-on-authorization"
@@ -3901,23 +3938,33 @@ def main() -> int:
     p.set_defaults(func=cmd_reassign)
 
     p = sub.add_parser("claim-done", help="seat verb: claim completion;"
-                                          " explicit independent reviewer judges")
-    p.add_argument("id")
-    p.add_argument("--note")
+                                          " explicit independent reviewer judges",
+                       description="Request independent verification without closing. A PR uses"
+                       " its independent reviewer when available; otherwise try the parent"
+                       " recipient, requester, commander role, then operator. Agent candidates"
+                       " must be reachable and distinct from the current worker. The verifier"
+                       " reads task show, accepts with task close --resolution done, or returns"
+                       " incomplete work with task chase --note 'remaining work'.")
+    p.add_argument("id", help="task ID whose current work you own")
+    p.add_argument("--note", help="deliverable, reproduction command, evidence, known gaps and validation")
     p.set_defaults(func=cmd_claim_done)
 
-    p = sub.add_parser("role", help="dynamic role graph: grant/revoke/list")
+    p = sub.add_parser("role", help="dynamic role graph: grant/revoke/list",
+                       description="Assign fleet responsibilities used by role:NAME routing.")
     p.add_argument("action", choices=("grant", "revoke", "list"))
-    p.add_argument("role", nargs="?")
-    p.add_argument("agent_id", nargs="?")
-    p.add_argument("--by", help="the ruling that authorizes this change")
+    p.add_argument("role", nargs="?", help="role name, required for grant/revoke")
+    p.add_argument("agent_id", nargs="?", help="one registered agent ID, required for grant/revoke")
+    p.add_argument("--by", help="required for grant: record existing operator/commander authorization,"
+                   " e.g. 'operator approved this assignment'")
     p.set_defaults(func=cmd_role)
 
-    p = sub.add_parser("team", help="per-goal small team membership")
+    p = sub.add_parser("team", help="per-goal small team membership",
+                       description="For tasks under this goal, a matching team role takes"
+                       " precedence over the fleet role when choosing a recipient.")
     p.add_argument("action", choices=("add", "list"))
-    p.add_argument("parent", nargs="?")
-    p.add_argument("agent_id", nargs="?")
-    p.add_argument("team_role", nargs="?")
+    p.add_argument("parent", nargs="?", help="parent goal ID, required for add; list shows all goals")
+    p.add_argument("agent_id", nargs="?", help="one registered agent ID, required for add")
+    p.add_argument("team_role", nargs="?", help="role name used for routing in this goal, required for add")
     p.set_defaults(func=cmd_team)
 
     p = sub.add_parser("topology", help="one-page CURRENT topology: active"
@@ -3927,7 +3974,12 @@ def main() -> int:
 
     p = sub.add_parser("onboard", help="entry-side self-brief: what this seat"
                        " owes, roles it holds, predecessor handoff notes to"
-                       " read. Read-only; agent-boot runs it on every join")
+                       " read. Read-only; agent-boot runs it on every join",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description="Read an existing registration's tasks, roles and handoff.\n"
+                       "This does not register an agent. Joining procedure:\n"
+                       f"{SCRIPT_DIR.parent / 'references/agent-bus.md'}\n"
+                       "See 'Join the current session'.")
     p.add_argument("identity", help="agent_id, handle, or alias of the seat")
     p.set_defaults(func=cmd_onboard)
 
@@ -4033,22 +4085,30 @@ def main() -> int:
             ledger = load_script("dispatch-ledger.py", "dispatch_ledger_for_orc_cli")
         return ledger
 
-    for verb, help_text in (("ack", "recipient acknowledged / took it"),
-                            ("chase", "record a chase and re-arm the check"),
-                            ("note", "record something, claiming nothing")):
-        p = sub.add_parser(verb, help=help_text)
-        p.add_argument("id")
-        p.add_argument("--note")
-        p.add_argument("--after", default="2h" if verb == "ack" else "30m")
+    for verb, help_text in (("ack", "Accept the task's current action without claiming completion."),
+                            ("chase", "Return incomplete work with findings and schedule another check."),
+                            ("note", "Record progress without claiming completion.")):
+        p = sub.add_parser(verb, help=help_text, description=help_text)
+        p.add_argument("id", help="task ID")
+        p.add_argument("--note", help={
+            "ack": "optional acceptance details, e.g. 'Accepted; checking the reported failure'",
+            "chase": "remaining work or verification findings for the responsible person",
+            "note": "progress, evidence or a next step, e.g. 'Reproduced failure; test output at PATH'",
+        }[verb])
+        p.add_argument("--after", default="2h" if verb == "ack" else "30m",
+                       help="next check delay, e.g. 45m, 2h, 1d (default: %(default)s)")
         p.set_defaults(func=lambda a, v=verb: getattr(lazy_ledger(), f"cmd_{v}")(a))
 
-    p = sub.add_parser("close", help="close a task with a resolution")
-    p.add_argument("id")
+    p = sub.add_parser("close", help="close a task with a resolution",
+                       description="Record the final resolution. For done, independently verify"
+                       " the deliverable first; verification is the closer's responsibility."
+                       " Use task claim-done to request review, or task chase to return incomplete work.")
+    p.add_argument("id", help="task ID")
     p.add_argument("--resolution", required=True, choices=wp.RESOLUTIONS)
     p.add_argument("--by", help="the dispatch ID that supersedes or takes over"
                                 " this one (records the edge); NOT an identity -"
                                 " the closer is recorded automatically")
-    p.add_argument("--note")
+    p.add_argument("--note", help="verification evidence for done, or reason for the other resolution")
     p.set_defaults(func=lambda a: lazy_ledger().cmd_close(a))
 
     p = sub.add_parser("list", help="list tasks (open by default)")
@@ -4063,8 +4123,10 @@ def main() -> int:
     p.add_argument("--run-checks", action="store_true")
     p.set_defaults(func=lambda a: lazy_ledger().cmd_overdue(a))
 
-    p = sub.add_parser("show", help="full history of one task")
-    p.add_argument("id")
+    p = sub.add_parser("show", help="full history of one task",
+                       description="Read the task's request, responsibility, checks, stored review"
+                       " evidence and event history.")
+    p.add_argument("id", help="task ID from task list or a dispatch message")
     p.set_defaults(func=lambda a: lazy_ledger().cmd_show(a))
 
     p = sub.add_parser("link", help="typed edge between two tasks")

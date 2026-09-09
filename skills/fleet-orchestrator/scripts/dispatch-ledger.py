@@ -424,6 +424,9 @@ def cmd_show(args: argparse.Namespace) -> int:
     if row["body"]:
         print("body ---")
         print(row["body"])
+    if row["receipt_body"]:
+        print("receipt (stored; verify the current artifact) ---")
+        print(row["receipt_body"])
     intents = wp.open_review_intents(conn, row["id"])
     if intents:
         print("review intents (open) ---")

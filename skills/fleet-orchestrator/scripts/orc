@@ -27,7 +27,7 @@ GROUPS = {
         "close": "Close with a resolution after the required verification",
         "chase": "Record a follow-up and schedule another check",
         "link": "Connect tasks with a dependency or other typed relationship",
-        "handshake": "Wait for acknowledgement of a dispatched task",
+        "handshake": "Wait for message presentation or task-response evidence",
         "announce": "Send an announcement to selected recipients",
     },
     "review": {
@@ -65,10 +65,14 @@ WORKFLOWS = {
     "review": "PR work: task open/dispatch --workflow pr -> readiness check -> review verdict.\n"
               "Blockers return work to the author; a clean verdict requires review receipt.\n"
               "A receipt supplies evidence, never merge permission.",
-    "goal": "A goal is a parent task. Attach work with task open --parent GOAL_ID;\n"
-            "goal team records its people, while task link records dependencies.",
+    "goal": "A goal is a parent task. Attach work with task open --parent GOAL_ID.\n"
+            "A goal team role overrides the same fleet role for that goal's tasks;\n"
+            "task link records dependencies.",
     "agent": "agent role assigns a fleet responsibility; goal team assigns people to one goal.\n"
-             "onboard reads existing registration; joining itself uses Agent Bus/agent-boot.",
+             "onboard reads existing registration. Join from the actual agent pane with\n"
+             f"{HERE / 'agent-boot.sh'} TASK_SLUG.\n"
+             f"Joining procedure: {HERE.parent / 'references/agent-bus.md'} "
+             "(Join the current session).",
     "admin": "The configured scheduler owns real ticks. Use tick --dry-run for inspection.\n"
              "Unselected 'orc admin tick' covers configured fleets; a named fleet limits it.",
 }
@@ -146,7 +150,7 @@ def legacy_help(prefix):
 
 
 def requested_help(args, prefix):
-    if not args or args in (["--help"], ["-h"]):
+    if not args or args in (["--help"], ["-h"], ["fleet"]):
         root_help(prefix)
         return 0
     if args == ["legacy"]:

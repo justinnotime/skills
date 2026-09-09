@@ -27,6 +27,11 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
+usage() {
+  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
+  exit "${1:-1}"
+}
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="$HERE/lib/fleet-profile.py"
 entry_resolved=0
@@ -43,6 +48,7 @@ if [[ "$entry_resolved" == 0 ]]; then
     selection=(--fleet "$2")
     shift 2
   fi
+  case "${1:-}" in -h|--help|help) usage 0 ;; esac
   exec python3 "$PROFILE" exec-current "${selection[@]}" -- bash "$0" --resolved "$@"
 fi
 
@@ -66,11 +72,6 @@ fi
 
 die() { echo "matrix-bus: $*" >&2; exit 1; }
 
-
-usage() {
-  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
-  exit 1
-}
 
 host_prefix() {
   if [ -s "$CFG/host-prefix" ]; then tr -d ' \n' < "$CFG/host-prefix"; else hostname -s; fi

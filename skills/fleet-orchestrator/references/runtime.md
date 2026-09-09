@@ -13,7 +13,7 @@ export PATH="$HOME/.local/bin:$PATH"
 orc --help
 agent-bus --help
 orc task open --to operator --subject "Review the sample output" \
-  --body "Inspect the generated output and record the decision." --no-check
+  --body "Inspect the output and decide; this needs human judgment with no automated progress check." --no-check
 orc board
 orc admin verify
 ```
@@ -57,7 +57,9 @@ ORC's `-t` selects only a fleet; a window is an argument of `view`.
 one-line descriptions. `orc help task` and `orc fleet example task --help`
 explain the same group; `orc fleet example task dispatch --help` shows exact
 arguments. `orc help legacy` maps old flat spellings to their grouped forms.
-Help and invalid-command hints do not select or initialize task stores.
+Root and group help work without resolving a fleet. Argument help can require
+a valid selected fleet; use `orc task dispatch --help` to discover arguments
+before choosing one. Help does not initialize task stores.
 
 | Group | Responsibility |
 |---|---|
@@ -68,8 +70,9 @@ Help and invalid-command hints do not select or initialize task stores.
 | `admin` | Inspect configuration, diagnose state, back up or run the scheduler |
 
 `task open` records work without sending it; `task dispatch` also delivers it.
-The recipient uses `task ack` to accept it, while `task handshake` lets the
-sender wait for acknowledgement. `task note` reports progress. `task blocked`
+The recipient uses `task ack` to accept it. `task handshake` can succeed when
+the message is merely presented; inspect `task show` for explicit acceptance
+or progress. `task note` reports progress. `task blocked`
 records a required decision and its decision maker; `task reassign` changes who
 owes the work. `task claim-done` requests independent verification and leaves
 the task open. `task close` records the final resolution after that verification.
@@ -79,6 +82,41 @@ check hands it to the reviewer, who uses `review verdict`. Blockers return it
 to the author; a clean review leads to `review receipt`, where the author
 records verification evidence. The receipt supports the merge decision and
 does not grant permission to merge.
+
+For example, the author registers a PR in its owning fleet, then the independent
+reviewer and author each record their part. Replace the identities, repository,
+PR URL and task ID below. The three absolute command paths are placeholders for
+trusted checks you supply, not bundled scripts: `pr-ready` exits 0 only when the
+PR is ready for review; `pr-head` exits 0 and prints its current commit SHA;
+`pr-merged` exits 0 only after it has actually merged. They run on the machine
+and in the working directory of the ORC process that executes the checks.
+
+```bash
+# Author: record work already known to you; dispatch also sends a notification.
+orc fleet example task open --workflow pr \
+  --to AUTHOR --owner AUTHOR --reviewer REVIEWER --repo example/project \
+  --subject "Review PR 123" --link https://github.com/example/project/pull/123 \
+  --body "Review the PR against its stated acceptance conditions." \
+  --ready-cmd '/absolute/path/pr-ready example/project 123' \
+  --check '/absolute/path/pr-head example/project 123' \
+  --done-cmd '/absolute/path/pr-merged example/project 123'
+
+# Independent reviewer: after readiness and reviewing the actual PR revision.
+orc fleet example review verdict TASK_ID clean \
+  --note 'Reviewed HEAD_SHA; findings at PR_REVIEW_URL'
+
+# Author: after the clean verdict, provide the evidence required by project policy.
+orc fleet example review receipt TASK_ID \
+  --body-file /absolute/path/review-evidence.md
+
+# Read the request, stored evidence and history together.
+orc fleet example task show TASK_ID
+```
+
+Use the task ID printed by `task open`. A reviewer who finds blocking issues
+uses `blockers` instead of `clean` and describes them in `--note`; the author
+fixes the work before another review. The configured scheduler runs the checks;
+see `task open --help` for their omission behavior and execution requirements.
 
 `agent role` assigns a fleet responsibility; `goal team` associates people with
 one goal. `agent onboard` reads an existing identity's obligations and handoff;
