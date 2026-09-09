@@ -1,8 +1,8 @@
 """Archive complete Outlook messages through the configured Genspark CLI.
 
 Structured folder and email endpoints provide explicit continuation cursors
-and body coverage. Archive checkpoints advance only after the selected folder
-pages and full message bodies have all been validated and written.
+and body coverage. Complete messages can advance independently; incomplete
+bodies stay pending until the source supplies their full text.
 """
 
 from __future__ import annotations
@@ -247,7 +247,12 @@ def list_emails(client, settings, folder, after, before, skip_read=False):
         if payload.get("folder_id") != folder:
             raise ArchiveError("Outlook email page belongs to a different folder")
         for raw in payload["emails"]:
-            email = normalize_email(raw, skip_read=skip_read)
+            incomplete = isinstance(raw, dict) and raw.get("body_coverage") in {
+                "preview",
+                "missing",
+            }
+            email = normalize_email(raw, skip_read=skip_read or incomplete)
+            email["_body_coverage"] = raw["body_coverage"]
             identity = email["id"]
             if identity in records and records[identity] != email:
                 raise ArchiveError("Outlook email identity changed between pages")
@@ -380,7 +385,27 @@ def repair_state(settings, state):
     return result
 
 
-def selected_dates(args, settings):
+def pending_bodies(state):
+    pending = state.get("pending_bodies", {})
+    if not isinstance(pending, dict):
+        raise ArchiveError("email pending-body state is invalid")
+    for identity, item in pending.items():
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or any(ord(char) < 32 for char in identity)
+            or not isinstance(item, dict)
+            or item.get("body_coverage") not in {"preview", "missing"}
+        ):
+            raise ArchiveError("email pending-body state is invalid")
+        try:
+            date.fromisoformat(item["after"])
+        except (KeyError, ValueError, TypeError) as error:
+            raise ArchiveError("email pending-body retry date is invalid") from error
+    return dict(pending)
+
+
+def selected_dates(args, settings, state=None):
     today = datetime.now(timezone.utc).date()
     try:
         after = (
@@ -389,6 +414,11 @@ def selected_dates(args, settings):
             else today - timedelta(days=settings.options.get("lookback_days", 7))
         )
         before = date.fromisoformat(args.before) if args.before else today + timedelta(days=1)
+        if not args.after and state:
+            if state.get("last_before"):
+                after = min(after, date.fromisoformat(state["last_before"]) - timedelta(days=1))
+            for item in pending_bodies(state).values():
+                after = min(after, date.fromisoformat(item["after"]))
     except ValueError as error:
         raise ArchiveError("email date bounds must use YYYY-MM-DD") from error
     if after >= before:
@@ -414,7 +444,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         settings = load_config(args.config, "emails", root=args.root, state_file=args.state_file)
-        after, before = selected_dates(args, settings)
+        state = read_state(settings.state_file)
+        pending = pending_bodies(state)
+        after, before = selected_dates(args, settings, state)
         folders = (
             [part.strip() for part in args.folders.split(",")]
             if args.folders is not None
@@ -444,7 +476,7 @@ def main(argv=None):
                 )
             )
             return 0
-        state = repair_state(settings, read_state(settings.state_file))
+        state = repair_state(settings, state)
         synced = set(state["synced_ids"])
         client = Client(settings)
         unique = {}
@@ -459,6 +491,14 @@ def main(argv=None):
         for email in selected:
             identity = email["id"]
             if identity in synced:
+                pending.pop(identity, None)
+                continue
+            if not args.skip_read and email["_full"] is None:
+                previous = pending.get(identity, {})
+                pending[identity] = {
+                    "after": min(previous.get("after", after.isoformat()), after.isoformat()),
+                    "body_coverage": email["_body_coverage"],
+                }
                 continue
             filename = filename_for(email)
             destination = output_path(settings, Path(bucket_of(filename)) / filename)
@@ -466,16 +506,27 @@ def main(argv=None):
             write_text(destination, email_to_markdown(email, full))
             if not args.skip_read:
                 synced.add(identity)
+                pending.pop(identity, None)
             written += 1
-        state.update(
-            synced_ids=sorted(synced),
-            last_sync=datetime.now(timezone.utc).isoformat(),
-            last_after=after.isoformat(),
-            last_before=before.isoformat(),
-        )
+        state.update(synced_ids=sorted(synced), pending_bodies=pending)
+        if not pending and not args.skip_read:
+            state.update(
+                last_sync=datetime.now(timezone.utc).isoformat(),
+                last_after=after.isoformat(),
+                last_before=before.isoformat(),
+            )
         write_state(settings.state_file, state)
+        for identity, item in sorted(pending.items()):
+            print(
+                f"WARN email body {item['body_coverage']}; message_id={json.dumps(identity)}; "
+                f"retry from {item['after']}; not marked complete",
+                file=sys.stderr,
+            )
+        status = "WARN" if pending or args.skip_read else "OK"
         print(
-            f"OK email archive: {len(selected)} selected, {written} written, {moved} moved to month directories, {len(synced)} full messages checkpointed"
+            f"{status} email archive: {len(selected)} selected, {written} written, "
+            f"{moved} moved to month directories, {len(synced)} full messages checkpointed, "
+            f"{len(pending)} bodies pending"
         )
         return 0
     except ArchiveError as error:

@@ -69,7 +69,23 @@ full text without a separate read or summarization call. Folder configuration
 accepts exact folder IDs or uniquely matching display names; `inbox` and `sent`
 retain their established aliases. Unknown or ambiguous folders fail instead of
 broadening selection. Each page's coverage and the final completion flag are
-checked. Dropped records, missing bodies and repeated cursors prevent success.
+checked. Dropped records and repeated cursors prevent publication. A message
+explicitly marked `preview` or `missing` is retained in the external state's
+`pending_bodies` with its retry start date; it is neither written as a full
+archive nor added to `synced_ids`. Complete messages still publish. These
+runs return zero with `WARN` and the unresolved IDs, while `last_sync`,
+`last_after` and `last_before` remain at the last fully complete collection.
+Malformed records, failed listings and write failures still return nonzero
+without advancing state. No additional prose-reading or model call is made.
+
+Without an explicit `--after`, the query includes the previous complete
+interval's last day and every pending retry start date. This prevents a long
+outage or unresolved body from falling out of the configured lookback. A
+pending ID is cleared only after a full body is archived (or an existing
+full archive is confirmed), not merely because it disappears from a listing.
+Explicit date and folder overrides still control the requested collection;
+they do not discard unresolved IDs outside that selection.
+
 `--skip-read` is an explicit metadata-only operation. Email files retain their
 date, subject slug and shortened immutable-ID hash in month directories; existing
 `synced_ids` state is supported. Missing archived files cause their remembered

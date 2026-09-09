@@ -25,7 +25,10 @@ interpreter must have the declared package dependencies. Each command supports
 
 For collection, select a caller-owned worktree with `--root` and a staged
 external `--state-file` for email or meeting progress. State advances only after
-the whole selected operation succeeds. A failed operation can leave partial
+all selected pages validate and the planned files are written. Email bodies
+explicitly marked incomplete remain in `pending_bodies`; other full messages
+can be published. Such a run exits zero with `WARN`, and leaves `last_sync`
+unchanged until every pending body is complete. A failed operation can leave partial
 local output, which must not be published. Transactional Git publication and
 schedule management belong to the caller.
 
@@ -34,6 +37,11 @@ archive. Outlook email and meeting collection follow explicit continuation token
 refuse incomplete pagination. Calendar collection fails when the event listing
 is truncated or reaches its requested limit; narrow the selected dates or adjust
 the configured limit within the service's supported range.
+
+The default email window includes the previous complete interval and pending
+body retry dates, so outages and unresolved bodies cannot silently age out of
+the configured lookback. Pending bodies that disappear from a listing stay
+pending; absence is not proof of a complete archive.
 
 Email attachment metadata and source-provided meeting notes are preserved, but no
 attachment download or AI summary is requested. Explicit `--skip-read` writes
@@ -45,4 +53,4 @@ all calendar fields. Historical archive
 files are not deleted when records disappear from service listings.
 
 Verify changes from this package with `uv run --locked pytest tests -q`,
-`uv run --locked ruff check .` and `uv run --locked agentskills validate .`.
+`uv run --locked ruff check .` and `uv run --locked agentskills validate "$PWD"`.
