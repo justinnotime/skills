@@ -35,10 +35,68 @@ def test_help_explains_fleet_work_without_initializing_state(fleet):
     before = list(fleet.root.rglob("*"))
     text = orc(fleet, "--help").stdout
     assert "orc fleet NAME" in text and "tview -t" in text
-    assert "import-state" not in text
+    assert "admin import-state" in text
     assert "fleet-orchestrator.py" not in text
+    assert "task open" in text and "task dispatch" in text
+    assert "agent topology" in text and "task brief" in text
+    assert "review verdict" in text and "review receipt" in text
+    assert "goal team" in text and "agent role" in text
+    assert "claim-done" in text and "does not close" in text
     assert "task" in orc(fleet, "fleet", "--help").stdout
     assert "claim-done" in orc(fleet, "fleet", "example", "task", "--help").stdout
+    assert list(fleet.root.rglob("*")) == before
+
+
+def test_help_explains_workflow_and_legacy_names_without_selecting_a_fleet(fleet):
+    before = list(fleet.root.rglob("*"))
+    text = orc(fleet, "fleet", "missing", "help", "task").stdout
+    assert "orc fleet missing task COMMAND --help" in text
+    assert "Record a task without sending" in text
+    assert "Record a task and send" in text
+    assert "handshake" in text and "acknowledgement" in text
+    assert "open -> ack -> note -> claim-done" in text
+    text = orc(fleet, "help", "review").stdout
+    assert "review verdict" in text and "review receipt" in text
+    assert "merge permission" in text
+    text = orc(fleet, "help", "legacy").stdout
+    assert "statusline" in text and "board --view summary" in text
+    assert "topology" in text and "agent topology" in text
+    assert list(fleet.root.rglob("*")) == before
+
+
+def test_unknown_commands_show_grouped_help_without_flat_parser_choices(fleet):
+    before = list(fleet.root.rglob("*"))
+    for args, expected in [
+        (("mistyped",), "task dispatch"),
+        (("fleet", "missing", "mistyped"), "task dispatch"),
+        (("fleet", "missing", "review", "mistyped"), "receipt"),
+        (("help", "mistyped"), "task dispatch"),
+    ]:
+        result = orc(fleet, *args, check=False)
+        assert result.returncode == 2
+        assert "unknown" in result.stderr and expected in result.stderr
+        assert "choose from" not in result.stderr
+        assert "{open,dispatch" not in result.stderr
+    assert list(fleet.root.rglob("*")) == before
+
+
+def test_all_grouped_commands_offer_argument_help_without_writing_state(fleet):
+    before = list(fleet.root.rglob("*"))
+    # These former flat-only commands must have usable grouped entry points.
+    for group, action in [("agent", "topology"), ("task", "brief")]:
+        text = orc(fleet, "fleet", "default", group, action, "--help").stdout
+        assert f"orc fleet default {group} {action}" in text
+    assert list(fleet.root.rglob("*")) == before
+
+
+def test_invalid_leaf_arguments_keep_the_selected_command_usage(fleet):
+    before = list(fleet.root.rglob("*"))
+    result = orc(fleet, "fleet", "default", "task", "show", "example-id",
+                 "--unknown-option", check=False)
+    assert result.returncode == 2
+    assert "orc fleet default task show" in result.stderr
+    assert "unrecognized arguments" in result.stderr
+    assert "{open,dispatch" not in result.stderr
     assert list(fleet.root.rglob("*")) == before
 
 

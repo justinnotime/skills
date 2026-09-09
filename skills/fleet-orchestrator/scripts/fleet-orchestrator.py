@@ -2710,208 +2710,7 @@ def gh_cli() -> str:
     return os.environ.get("NW_GH_CLI") or "gh"
 
 
-def owner_from_window_titles(conn, number: int,
-                             titles=None) -> str | None:
-
-
-    import re as _re
-    if titles is None:
-        try:
-            titles = pane_sense.window_titles()
-        except RuntimeError:
-
-
-            return None
-    pat = _re.compile(rf"(?:PR\s*)?#\s*{number}\b", _re.IGNORECASE)
-    hits = []
-    for idx, name in titles:
-        if pat.search(name or ""):
-            hits.append(idx)
-    if len(set(hits)) != 1:
-        return None
-    return seat_for_window(conn, hits[0])
-
-
-def seat_for_window(conn, window) -> str | None:
-
-
-    rows = conn.execute(
-        "SELECT agent_id, tmux, host FROM seat WHERE addressable=1").fetchall()
-    import socket as _socket
-    local = _socket.gethostname().split(".", 1)[0]
-    owners = [r["agent_id"] for r in rows
-              if r["host"] == local
-              and str(wp.window_from_tmux_field(r["tmux"])) == str(window)]
-    return owners[0] if len(owners) == 1 else None
-
-
-def owner_from_branch(conn, head_ref: str) -> str | None:
-
-
-    import re as _re
-    m = _re.match(cfg.get("github.owner_branch_pattern", r"^agent/tmux(\d+)-"), head_ref or "")
-    if not m:
-        return None
-    return seat_for_window(conn, m.group(1))
-
-
-AUTOREG_CAP_PER_TICK = 5
 GH_OWNER = cfg.get("github.owner", "")
-
-
-AUTOREG_EXCLUDE_TITLE_PREFIXES = tuple(cfg.get("github.excluded_title_prefixes", []))
-AUTOREG_EXCLUDE_BRANCH_PREFIXES = tuple(cfg.get("github.excluded_branch_prefixes", []))
-
-
-def autoreg_excluded(pr: dict) -> bool:
-    title = (pr.get("title") or "").strip()
-    branch = (pr.get("headRefName") or "").strip()
-    return (any(title.startswith(x) for x in AUTOREG_EXCLUDE_TITLE_PREFIXES)
-            or any(branch.startswith(x)
-                   for x in AUTOREG_EXCLUDE_BRANCH_PREFIXES))
-
-
-PR_OWNER_DEFAULTS_FILE = cfg.path("github.owner_defaults_file")
-
-
-PR_REF_URL = re.compile(r"github\.com/[\w.-]+/([\w.-]+)/pull/(\d+)\b")
-PR_REF_REPO = re.compile(r"(?<![\w./-])([\w.-]+(?:/[\w.-]+)?)#(\d+)\b")
-PR_REF_BARE = re.compile(r"(?<![\w#])#(\d+)\b")
-
-
-def pr_refs(row) -> set[str]:
-
-
-    text = " ".join(((row["links"] or ""), (row["subject"] or ""),
-                     (row["body"] or ""))).lower()
-    refs = {f"{m.group(1)}#{m.group(2)}" for m in PR_REF_URL.finditer(text)}
-    for m in PR_REF_REPO.finditer(text):
-        refs.add(f"{wp.bare_repo(m.group(1))}#{m.group(2)}")
-    repo = wp.bare_repo(row["repo"] or "").lower()
-    if repo:
-        refs.update(f"{repo}#{m.group(1)}" for m in PR_REF_BARE.finditer(text))
-    return refs
-
-
-def _pr_owner_default(repo: str) -> str:
-
-
-    try:
-        data = json.loads(PR_OWNER_DEFAULTS_FILE.read_text()) if PR_OWNER_DEFAULTS_FILE else {}
-    except (OSError, ValueError):
-        return "role:commander"
-    value = data.get(wp.bare_repo(repo), "")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return "role:commander"
-
-
-def tick_pr_autoregister(conn, dry: bool, registry_fresh: bool = True) -> int:
-
-
-    if not GH_OWNER:
-        return 0
-    registered = 0
-
-    rows = conn.execute(
-        "SELECT repo, links, subject, body, state, progress_hash FROM dispatch"
-    ).fetchall()
-    open_refs: set[str] = set()
-    closed_refs: dict[str, set[str]] = {}
-    for r in rows:
-        refs = pr_refs(r)
-        if r["state"] != "closed":
-            open_refs.update(refs)
-        elif r["progress_hash"]:
-            for ref in refs:
-                closed_refs.setdefault(ref, set()).add(r["progress_hash"])
-
-    def already_tracked(repo: str, number: int, head: str) -> bool:
-        ref = f"{repo.lower()}#{number}"
-        if ref in open_refs:
-            return True
-        if not head:
-            return False
-        seen = closed_refs.get(ref, set())
-        return bool(seen & {wp.content_hash(head), wp.content_hash(head + "\n")})
-    for repo in wp.MERGE_KEYS:
-        if registered >= AUTOREG_CAP_PER_TICK:
-            break
-        try:
-            out = subprocess.run(
-
-
-                [gh_cli(), "pr", "list", "--repo", f"{GH_OWNER}/{repo}",
-                 "--state", "open", "--author", "@me",
-                 "--json", "number,isDraft,title,headRefName,headRefOid"],
-                text=True, capture_output=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if out.returncode != 0:
-            continue
-        try:
-            prs = json.loads(out.stdout or "[]")
-        except ValueError:
-            continue
-        for pr in prs:
-            if registered >= AUTOREG_CAP_PER_TICK:
-                break
-            if pr.get("isDraft") or not isinstance(pr.get("number"), int):
-                continue
-            if autoreg_excluded(pr):
-                continue
-            link = f"{repo}#{pr['number']}"
-            if already_tracked(repo, pr["number"],
-                               str(pr.get("headRefOid") or "")):
-                continue
-            if dry:
-                log(f"DRY would auto-register a review task for {link}")
-                continue
-            owner = None
-            detector = ""
-
-
-            if registry_fresh:
-                owner = owner_from_window_titles(conn, pr["number"])
-                detector = "window-title convention"
-                if not owner:
-                    owner = owner_from_branch(conn, pr.get("headRefName"))
-                    detector = "configured owner branch convention"
-            fallback = _pr_owner_default(repo)
-            owner_note = (f"Owner resolved from the {detector}:"
-                          f" {owner}." if owner else
-                          f"Owner is parked on {fallback} ("
-                          + ("the current Agent Bus registry was unavailable;"
-                             " no stored membership was used"
-                             if not registry_fresh else
-                             "no unique window titled with this PR and no"
-                             " owner-naming branch")
-                          + "; per-repo default from"
-                          f" pr-owner-defaults.json) - the real owner claims"
-                          f" it with orc reassign.")
-            ref = f"--repo {GH_OWNER}/{repo}"
-            with conn:
-                did = wp.insert_task(
-                    conn, recipient=owner or fallback,
-                    subject=f"review {link}: {pr.get('title', '')}"[:180],
-                    body=(f"Auto-registered by the engine: {link} was open with"
-                          f" no review task (owners skip registration; the"
-                          f" engine does not). {owner_note}"),
-                    workflow="pr", repo=repo,
-                    owner_seat=owner or fallback,
-                    reviewer_seat="role:reviewer-pool",
-                    links=link,
-                    ready_cmd=(f"test \"$({gh_cli()} pr view {pr['number']}"
-                               f" {ref} --json isDraft --jq .isDraft)\" = false"),
-                    check_cmd=(f"{gh_cli()} pr view {pr['number']} {ref}"
-                               f" --json headRefOid --jq .headRefOid"),
-                    done_cmd=(f"test \"$({gh_cli()} pr view {pr['number']}"
-                              f" {ref} --json state --jq .state)\" = MERGED"),
-                    deadline_s=wp.parse_after("2h"))
-            open_refs.add(link)
-            log(f"OK auto-registered review task {did} for {link}")
-            registered += 1
-    return registered
 
 
 RECONCILE_CAP_PER_TICK = 5
@@ -3413,8 +3212,6 @@ def cmd_tick(args: argparse.Namespace) -> int:
         conn, dry, cycle_floor_event_id=cycle_floor_event_id,
         registry_trusted=(dry or registry_fresh),
         route_observation_id=route_observation_id)
-    if not local_session:
-        tick_pr_autoregister(conn, dry, registry_fresh=(dry or registry_fresh))
     if dry or registry_fresh:
         tick_reviewer_rotation(
             conn, dry, cycle_floor_event_id=cycle_floor_event_id,
@@ -4010,7 +3807,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog=os.environ.get("ORC_CLI_PROG", "orc"), description=__doc__.splitlines()[0])
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     def add_open_args(p, dispatchable=False):
         p.add_argument("--await", dest="await_notify", action="store_true",
@@ -4283,7 +4080,9 @@ def main() -> int:
     display_command = os.environ.get("ORC_CLI_COMMAND")
     if display_command and len(sys.argv) > 1 and sys.argv[1] in sub.choices:
         sub.choices[sys.argv[1]].prog = parser.prog + " " + display_command
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        sub.choices[args.cmd].error("unrecognized arguments: " + " ".join(unknown))
     try:
         if (os.environ.get("ORC_CLI_COMMAND")
                 and args.cmd not in {"board", "overview", "tree", "agents"}

@@ -51,6 +51,47 @@ The short selector `orc -t example board` selects the same fleet as
 word (such as `tick`, `list` or `stop`) can always use `-t NAME`. Unlike tview,
 ORC's `-t` selects only a fleet; a window is an argument of `view`.
 
+### Discovering commands and their relationships
+
+`orc --help` shows the complete command directory, grouped by purpose, with
+one-line descriptions. `orc help task` and `orc fleet example task --help`
+explain the same group; `orc fleet example task dispatch --help` shows exact
+arguments. `orc help legacy` maps old flat spellings to their grouped forms.
+Help and invalid-command hints do not select or initialize task stores.
+
+| Group | Responsibility |
+|---|---|
+| `task` | Record, deliver, accept, update, connect and close work |
+| `review` | Record a PR review verdict and the author's verification evidence |
+| `goal` | Organize child tasks and assign people to one goal |
+| `agent` | Inspect identities and terminals, manage roles, and perform handoffs |
+| `admin` | Inspect configuration, diagnose state, back up or run the scheduler |
+
+`task open` records work without sending it; `task dispatch` also delivers it.
+The recipient uses `task ack` to accept it, while `task handshake` lets the
+sender wait for acknowledgement. `task note` reports progress. `task blocked`
+records a required decision and its decision maker; `task reassign` changes who
+owes the work. `task claim-done` requests independent verification and leaves
+the task open. `task close` records the final resolution after that verification.
+
+PR work uses `--workflow pr` and names its author and reviewer. The readiness
+check hands it to the reviewer, who uses `review verdict`. Blockers return it
+to the author; a clean review leads to `review receipt`, where the author
+records verification evidence. The receipt supports the merge decision and
+does not grant permission to merge.
+
+`agent role` assigns a fleet responsibility; `goal team` associates people with
+one goal. `agent onboard` reads an existing identity's obligations and handoff;
+Agent Bus/agent-boot performs registration. `agent topology` relates identities
+to current panes and roles. Creating a fleet terminal does not register an agent.
+
+`board`, `goals` and `agents` remain short inspection entries. `statusline` and
+`kanban` are compatible forms of `board --view summary` and
+`board --view columns`; `tree` maps to `goal list` or `goal show ID`. Prefer
+these grouped forms in new instructions rather than learning a second workflow.
+
+### Selecting work
+
 Inside a real tmux pane, `orc board`, `orc task show TASK_ID` and `orc agent
 onboard ID` follow that pane's actual fleet. An explicit selector overrides it
 for the command and its descendants. Outside tmux the existing configured
@@ -159,8 +200,11 @@ default and live local fleets with existing task databases, runs them with
 bounded concurrency, and uses each task store's existing lock. A slow or failed
 fleet does not prevent another from starting. Newly created shell-only sessions
 need no database or scheduling job. Local fleets process their own recorded work
-and do not import the default fleet's configured GitHub projects or run its
-global repository patrol. Explicit `orc fleet NAME admin tick` remains a single-fleet
+and do not run the default fleet's global repository patrol. No fleet imports
+open PRs as new tasks: register each PR explicitly in its owning fleet with
+`task open` or `task dispatch`, using `--workflow pr`. GitHub account membership
+and merge responsibility do not establish task ownership.
+Explicit `orc fleet NAME admin tick` remains a single-fleet
 command. `orc admin tick --dry-run` inspects without scheduling writes or sends.
 Explicit legacy/network profiles keep their separately configured schedules.
 

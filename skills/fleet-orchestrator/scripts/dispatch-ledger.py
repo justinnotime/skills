@@ -116,8 +116,7 @@ def cmd_close(args: argparse.Namespace) -> int:
         _verdict, closing_hash = wp.run_progress(row["check_cmd"])
         if not closing_hash:
             print("NOTE  the task's check did not answer, so no head is recorded"
-                  " at closure; if its PR is still open the auto-registrar may"
-                  " open one fresh review task for it")
+                  " at closure")
     with conn:
         conn.execute(
             "UPDATE dispatch SET state=?, resolution=?, ask_flag=0,"
