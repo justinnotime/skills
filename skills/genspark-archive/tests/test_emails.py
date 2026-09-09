@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -543,10 +544,10 @@ def test_different_account_payload_is_rejected(configured, monkeypatch):
         )
 
 
-def test_body_coverage_failure_keeps_checkpoint_and_archive_unchanged(configured, monkeypatch):
+def test_partial_body_does_not_block_complete_messages(configured, monkeypatch, capsys):
     settings = configured[2]
     monkeypatch.undo()
-    initial = '{"synced_ids": []}\n'
+    initial = '{"synced_ids": [], "last_sync": "2026-02-01T00:00:00+00:00"}\n'
     settings.state_file.write_text(initial)
     client = FakeClient(
         [
@@ -557,6 +558,89 @@ def test_body_coverage_failure_keeps_checkpoint_and_archive_unchanged(configured
                 [structured_record("partial", body_coverage="preview")],
                 folder_id="folder-inbox",
             ),
+        ]
+    )
+    monkeypatch.setattr(emails, "Client", lambda *a: client)
+    assert run(configured) == 0
+    state = json.loads(settings.state_file.read_text())
+    assert state["synced_ids"] == ["first"]
+    assert state["last_sync"] == "2026-02-01T00:00:00+00:00"
+    assert state["pending_bodies"] == {
+        "partial": {"after": "2026-02-03", "body_coverage": "preview"}
+    }
+    assert len(list(settings.output_directory.glob("2026-02/*.md"))) == 1
+    assert (
+        "Complete structured message." in next(settings.output_directory.rglob("*.md")).read_text()
+    )
+    output = capsys.readouterr()
+    assert "WARN email archive" in output.out
+    assert 'message_id="partial"' in output.err
+    assert "not marked complete" in output.err
+
+
+def test_pending_body_survives_absence_and_finishes_when_full_body_arrives(configured, monkeypatch):
+    settings = configured[2]
+    pending = {"partial": {"after": "2000-01-01", "body_coverage": "missing"}}
+    settings.state_file.write_text(json.dumps({"synced_ids": [], "pending_bodies": pending}))
+    assert run(configured) == 0
+    assert json.loads(settings.state_file.read_text())["pending_bodies"] == pending
+    assert "last_sync" not in json.loads(settings.state_file.read_text())
+    monkeypatch.setattr(
+        emails, "list_emails", lambda *a, **k: [record("partial", _full={"text_body": ""})]
+    )
+    assert run(configured) == 0
+    state = json.loads(settings.state_file.read_text())
+    assert state["synced_ids"] == ["partial"]
+    assert state["pending_bodies"] == {}
+    assert state["last_sync"]
+    assert next(settings.output_directory.rglob("*.md")).read_text().endswith("*(no body)*")
+
+
+def test_default_window_retains_pending_bodies_and_outage_history(configured):
+    args = SimpleNamespace(after=None, before=None)
+    state = {"last_before": "2000-02-02"}
+    assert emails.selected_dates(args, configured[2], state)[0] == date(2000, 2, 1)
+    state["pending_bodies"] = {"partial": {"after": "2000-01-01", "body_coverage": "missing"}}
+    assert emails.selected_dates(args, configured[2], state)[0] == date(2000, 1, 1)
+    args.after = "2000-03-01"
+    assert emails.selected_dates(args, configured[2], state)[0] == date(2000, 3, 1)
+
+
+def test_known_full_archive_is_not_downgraded_by_partial_listing(configured, monkeypatch):
+    monkeypatch.setattr(emails, "list_emails", lambda *a, **k: [record()])
+    assert run(configured) == 0
+    monkeypatch.setattr(
+        emails, "list_emails", lambda *a, **k: [record(_full=None, _body_coverage="missing")]
+    )
+    assert run(configured) == 0
+    state = json.loads(configured[2].state_file.read_text())
+    assert state["synced_ids"] == [record()["id"]]
+    assert state["pending_bodies"] == {}
+
+
+@pytest.mark.parametrize(
+    "pending", [[], {"id": {}}, {"id": {"after": "bad", "body_coverage": "missing"}}]
+)
+def test_invalid_pending_state_is_not_discarded(configured, pending):
+    state_file = configured[2].state_file
+    initial = json.dumps({"synced_ids": [], "pending_bodies": pending})
+    state_file.write_text(initial)
+    assert run(configured) == 1
+    assert state_file.read_text() == initial
+
+
+def test_incomplete_pagination_still_prevents_all_checkpoint_changes(configured, monkeypatch):
+    monkeypatch.undo()
+    settings = configured[2]
+    initial = '{"synced_ids": []}\n'
+    settings.state_file.write_text(initial)
+    bad_page = page("emails", [], folder_id="folder-inbox")
+    bad_page["data"]["coverage"]["dropped_count"] = 1
+    client = FakeClient(
+        [
+            page("folders", [folder()]),
+            page("emails", [structured_record("first")], "next", folder_id="folder-inbox"),
+            bad_page,
         ]
     )
     monkeypatch.setattr(emails, "Client", lambda *a: client)
