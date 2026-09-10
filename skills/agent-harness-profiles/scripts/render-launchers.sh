@@ -65,67 +65,106 @@ OPENCODE_DATA_DIR="${OPENCODE_DATA_DIR:-${XDG_DATA_HOME:-${PROFILE_INSTALL_HOME}
 OPENCODE_CONFIG_SRC="${OPENCODE_CONFIG_SRC:-${XDG_CONFIG_HOME:-${PROFILE_INSTALL_HOME}/.config}/opencode}"
 OPENCODE_STATE_DIR="${OPENCODE_STATE_DIR:-${XDG_STATE_HOME:-${PROFILE_INSTALL_HOME}/.local/state}/opencode}"
 
-validate_entry() {
-  local tool=$1 label=$2 path=$3
-  profile_validate_root "${tool}" "${label}" "${path}"
+launcher_check() {
+  local name=$1 executable=$2 variable=$3
+  if type "${name}" >/dev/null 2>&1 || alias "${name}" >/dev/null 2>&1; then
+    fail "launcher name already exists: ${name}; preserve it and choose another label"
+  fi
+  if [[ "${executable}" == /* ]]; then
+    [[ -f "${executable}" && -x "${executable}" ]] ||
+      fail "${variable} must name an absolute executable command"
+    printf '  if [[ ! -f %q || ! -x %q ]]; then\n' "${executable}" "${executable}"
+  else
+    type -P "${executable}" >/dev/null ||
+      fail "command unavailable: ${executable}; configure ${variable} as an absolute executable"
+    printf '  if ! type -P %q >/dev/null; then\n' "${executable}"
+  fi
+  printf '    printf "%%s\\n" %q >&2; exit 1\n  fi\n' "Profile activation refused: command unavailable: ${executable}"
+  printf '  if type %q >/dev/null 2>&1 || alias %q >/dev/null 2>&1; then\n' "${name}" "${name}"
+  printf '    printf "%%s\\n" %q >&2; exit 1\n  fi\n' "Profile activation refused: launcher name already exists: ${name}; preserve it and choose another label"
 }
 
 emit_space_separated() {
-  local tool=$1 command_name=$2 variable_name=$3
-  local value entry label path seen=""
+  local tool=$1 command_name=$2 variable_name=$3 mode=$4
+  local value entry label path seen="" command_variable executable
   value=${!variable_name}
+  command_variable=${variable_name%_PROFILES}_COMMAND
+  executable=${!command_variable:-${command_name}}
+  if [[ -n "${value}" && -n "${!command_variable:-}" && "${executable}" != /* ]]; then
+    fail "${command_variable} must name an absolute executable command"
+  fi
   for entry in ${value}; do
     label=${entry%%:*}
     path=${entry#*:}
     [[ -n "${label}" && "${label}" != "${entry}" && -n "${path}" ]] ||
       fail "malformed ${variable_name} entry: ${entry}"
-    validate_entry "${tool}" "${label}" "${path}"
+    profile_validate_root "${tool}" "${label}" "${path}"
     [[ " ${seen} " != *" ${label} "* ]] || fail "duplicate ${tool} label: ${label}"
     seen="${seen} ${label}"
+    if [[ "${mode}" == check ]]; then
+      launcher_check "${command_name}-${label}" "${executable}" "${command_variable}"
+      continue
+    fi
     case "${tool}" in
       claude)
-        printf '%s-%s() {\n  CLAUDE_CONFIG_DIR=%q command %s "$@"\n}\n\n' \
-          "${command_name}" "${label}" "${path}" "${command_name}"
+        printf '%s-%s() {\n  CLAUDE_CONFIG_DIR=%q command %q "$@"\n}\n\n' \
+          "${command_name}" "${label}" "${path}" "${executable}"
         ;;
       codex)
-        printf '%s-%s() {\n  CODEX_HOME=%q command %s "$@"\n}\n\n' \
-          "${command_name}" "${label}" "${path}" "${command_name}"
+        printf '%s-%s() {\n  CODEX_HOME=%q command %q "$@"\n}\n\n' \
+          "${command_name}" "${label}" "${path}" "${executable}"
         ;;
       opencode)
-        printf '%s-%s() {\n  local profile_root=%q\n  XDG_DATA_HOME="$profile_root/share" XDG_STATE_HOME="$profile_root/state" XDG_CONFIG_HOME="$profile_root/config" command %s "$@"\n}\n\n' \
-          "${command_name}" "${label}" "${path}" "${command_name}"
+        printf '%s-%s() {\n  local profile_root=%q\n  XDG_DATA_HOME="$profile_root/share" XDG_STATE_HOME="$profile_root/state" XDG_CONFIG_HOME="$profile_root/config" command %q "$@"\n}\n\n' \
+          "${command_name}" "${label}" "${path}" "${executable}"
         ;;
     esac
   done
 }
 
 emit_dsh() {
-  local entry label path seen=""
+  local mode=$1 entry label path seen="" executable=${DSH_COMMAND:-dsh}
+  if [[ -n "${DSH_PROFILES}" && -n "${DSH_COMMAND:-}" && "${executable}" != /* ]]; then
+    fail 'DSH_COMMAND must name an absolute executable command'
+  fi
   while IFS= read -r entry; do
     [[ -n "${entry}" ]] || continue
     label=${entry%%:*}
     path=${entry#*:}
     [[ -n "${label}" && "${label}" != "${entry}" && -n "${path}" ]] ||
       fail "malformed DSH_PROFILES entry: ${entry}"
-    validate_entry dsh "${label}" "${path}"
+    profile_validate_root dsh "${label}" "${path}"
     [[ " ${seen} " != *" ${label} "* ]] || fail "duplicate dsh label: ${label}"
     seen="${seen} ${label}"
-    printf 'dsh-%s() {\n  DSH_HOME=%q command dsh "$@"\n}\n\n' "${label}" "${path}"
+    if [[ "${mode}" == check ]]; then
+      launcher_check "dsh-${label}" "${executable}" DSH_COMMAND
+    else
+      printf 'dsh-%s() {\n  DSH_HOME=%q command %q "$@"\n}\n\n' "${label}" "${path}" "${executable}"
+    fi
   done <<< "${DSH_PROFILES}"
 }
 
-render() {
+render_entries() {
+  local mode=$1
   profile_reset_root_registry
   profile_reserve_path 'Skill checkout' "$(git -C "${SKILL_DIR}" rev-parse --show-toplevel 2>/dev/null || printf '%s' "${SKILL_DIR}")"
   profile_reserve_fixed_install_roots
   profile_reserve_native_roots
   profile_reserve_path 'profile configuration' "${config_file}"
+  emit_space_separated claude claude CLAUDE_PROFILES "${mode}"
+  emit_space_separated codex codex CODEX_PROFILES "${mode}"
+  emit_space_separated opencode opencode OPENCODE_PROFILES "${mode}"
+  emit_dsh "${mode}"
+}
+
+render() {
   printf '%s\n' '# Generated by agent-harness-profiles. Edit the config, then regenerate.'
-  printf '%s\n\n' '# Plain commands continue to select their native default roots.'
-  emit_space_separated claude claude CLAUDE_PROFILES
-  emit_space_separated codex codex CODEX_PROFILES
-  emit_space_separated opencode opencode OPENCODE_PROFILES
-  emit_dsh
+  printf '%s\n\n' '# Plain commands are unchanged; only the configured root variables are overridden.'
+  # Check in the caller's shell before defining anything, including unexported aliases/functions.
+  printf '%s\n' 'if ! (' ':'
+  render_entries check
+  printf '%s\n\n' '); then' '  return 1 2>/dev/null || exit 1' 'fi'
+  render_entries define
 }
 
 validate_output() {

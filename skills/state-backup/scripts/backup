@@ -271,28 +271,45 @@ backup_codex() {
 # ============================================================================
 # opencode Backup
 # ============================================================================
+backup_opencode_database() (
+  local db="$1" db_dst="$2" temporary_file="" sqlite_target destination
+  # Each invocation owns its temporary files, including during overlapping runs.
+  trap '[ -z "$temporary_file" ] || rm -f -- "$temporary_file" "${temporary_file}-journal" "${temporary_file}-wal" "${temporary_file}-shm"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -p "$db_dst" || return 1
+  destination="$db_dst/$(basename "$db")"
+  [ ! -d "$destination" ] || return 1
+  temporary_file=$(mktemp "$db_dst/.opencode-backup.XXXXXX") || return 1
+  # SQLite dot commands use backslash escapes inside double-quoted arguments.
+  sqlite_target=${temporary_file//\\/\\\\}
+  sqlite_target=${sqlite_target//\"/\\\"}
+  sqlite3 "$db" ".backup \"$sqlite_target\"" || return 1
+  mv -f -- "$temporary_file" "$destination" || return 1
+)
+
 backup_opencode_dir() {
   local label="$1" data_dir="$2" config_dir="$3" state_dir="$4" dst_root="$5"
   log "=== opencode Backup ($label) ==="
 
   # Sessions DB (SQLite WAL) — consistent snapshot via sqlite3 .backup
   local db_dst="$dst_root/db"
-  local db_found=0
+  local db_found=0 db_failed=0
   local db
   for db in "$data_dir"/*.db; do
     [ -f "$db" ] || continue
     db_found=1
-    mkdir -p "$db_dst"
     if command -v sqlite3 >/dev/null 2>&1; then
-      if sqlite3 "$db" ".backup '$db_dst/$(basename "$db")'"; then
+      if backup_opencode_database "$db" "$db_dst"; then
         log "  DB: $(basename "$db") ($(du -h "$db" | cut -f1)) → $db_dst (sqlite3 .backup)"
       else
-        log "  ⚠ DB: sqlite3 .backup failed for $db"
+        log "  FAIL DB: sqlite3 snapshot or replacement failed for $db; previous snapshot preserved"
+        db_failed=1
       fi
     else
-      rsync -a "$db" "$db_dst/"
-      [ -f "${db}-wal" ] && rsync -a "${db}-wal" "${db}-shm" "$db_dst/"
-      log "  DB: $(basename "$db") → $db_dst (rsync; sqlite3 not installed)"
+      log "  FAIL DB: sqlite3 is required for $db; previous snapshot preserved"
+      db_failed=1
     fi
   done
   [ "$db_found" -eq 1 ] || log "  DB: none found in $data_dir"
@@ -326,7 +343,10 @@ backup_opencode_dir() {
 
   # auth.json / mcp-auth.json intentionally NOT backed up (credentials)
 
-  if [ "$db_found" -eq 1 ] || [ -d "$config_dir" ]; then
+  if [ "$db_failed" -ne 0 ]; then
+    log "  opencode ($label) backup incomplete"
+    BACKUP_FAILURES=$((BACKUP_FAILURES + 1))
+  elif [ "$db_found" -eq 1 ] || [ -d "$config_dir" ]; then
     log "  opencode ($label) backup completed"
     BACKED_UP_TOOLS+=("opencode ($label)")
   else

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr
 from io import StringIO
@@ -45,7 +47,7 @@ class InstallAgentBusPullNotifyTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout=stdout)
 
         patches = (
-            mock.patch.dict(os.environ, {"AGENT_BUS_TRANSPORT": "matrix"}),
+            mock.patch.dict(os.environ, {"AGENT_BUS_TRANSPORT": "matrix", "HOME": str(root)}, clear=True),
             mock.patch.object(installer.cfg, "path", return_value=self.template),
             mock.patch.object(installer, "CODEX", self.codex),
             mock.patch.object(installer, "UNIT_DIR", self.unit_dir),
@@ -142,6 +144,39 @@ class InstallAgentBusPullNotifyTests(unittest.TestCase):
         self.assertEqual(output.count(installer.HOOK_MARKER), 1)
         self.assertIn(str(ROOT / "scripts/agent-bus-codex-stop-hook.py"), output)
 
+    def test_identical_unmarked_hook_survives_marker_drift_and_retains_trust(self) -> None:
+        original = ('model = "test"\n' + "\n".join(installer.hook_lines()[:-1]) + '\n'
+                    '[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
+                    'type = "command"\ncommand = "custom-start"\n'
+                    + installer.HOOK_MARKER + '\n'
+                    '[hooks.state."synthetic:stop:0:0"]\n'
+                    'enabled = false\ntrusted_hash = "synthetic-hash"\n')
+        self.codex.parent.mkdir(parents=True)
+        self.codex.write_text(original)
+        installer.main([])
+        installer.main([])
+        self.assertEqual(self.codex.read_text(), original)
+        parsed = tomllib.loads(original)
+        self.assertEqual(len(parsed["hooks"]["Stop"]), 1)
+        self.assertFalse(parsed["hooks"]["state"]["synthetic:stop:0:0"]["enabled"])
+
+    def test_marker_in_a_later_table_does_not_delete_an_unrelated_stop_hook(self) -> None:
+        original = ('[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\n'
+                    'command = "custom-stop"\n'
+                    '[tui]\n' + installer.HOOK_MARKER + '\nanimations = false\n')
+        result = tomllib.loads(installer.replace_managed_hook(original))
+        self.assertEqual(result["hooks"]["Stop"][0]["hooks"][0]["command"], "custom-stop")
+        self.assertFalse(result["tui"]["animations"])
+        self.assertEqual(len(result["hooks"]["Stop"]), 2)
+
+    def test_matching_text_outside_stop_is_not_an_installed_stop_hook(self) -> None:
+        command = tomllib.loads("\n".join(installer.hook_lines()))["hooks"]["Stop"][0]["hooks"][0]["command"]
+        original = ('[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
+                    'type = "command"\ncommand = ' + json.dumps(command) + '\n')
+        result = tomllib.loads(installer.replace_managed_hook(original))
+        self.assertEqual(len(result["hooks"]["Stop"]), 1)
+        self.assertEqual(len(result["hooks"]["UserPromptSubmit"]), 1)
+
     def test_missing_named_profile_fails_before_writing(self) -> None:
         installer.subprocess.run.side_effect = subprocess.CalledProcessError(
             2, ["fleet-profile.py", "resolve", "alpha"]
@@ -169,6 +204,25 @@ class InstallAgentBusPullNotifyTests(unittest.TestCase):
         self.assertFalse(self.codex.exists())
         self.assertFalse(self.unit_dir.exists())
         self.assertEqual(self.calls, [])
+
+
+def test_installer_respects_codex_home_and_explicit_file_override(tmp_path):
+    for override in (False, True):
+        home = tmp_path / str(override)
+        codex = home / "custom codex"
+        target = home / "selected config.toml" if override else codex / "config.toml"
+        env = {"HOME": str(home), "CODEX_HOME": str(codex), "PYTHONDONTWRITEBYTECODE": "1"}
+        if override:
+            env["TURN_HOOKS_CODEX_CONFIG"] = str(target)
+        result = subprocess.run([sys.executable, "-B", str(SCRIPT)], env=env,
+                                capture_output=True, text=True, timeout=10, check=False)
+        assert result.returncode == 0, result.stderr
+        assert len(tomllib.loads(target.read_text())["hooks"]["Stop"]) == 1
+        assert not (home / ".codex").exists()
+        assert not (home / ".config/systemd").exists()
+        assert "trusted_hash" not in target.read_text()
+        if override:
+            assert not codex.exists()
 
 
 if __name__ == "__main__":

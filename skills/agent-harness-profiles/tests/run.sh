@@ -49,6 +49,7 @@ write_full_config() {
   cat > "${config_file}" <<EOF
 MACHINE_ID="fixture-profile-host"
 BACKUP_COMMAND="${PRIMARY_CHECKOUT}/backup.sh"
+DSH_COMMAND="${fake_bin}/deepseek harness"
 CLAUDE_PROFILES="alpha:${home_dir}/profiles/claude-alpha beta:${home_dir}/profiles/claude-beta"
 CODEX_PROFILES="alpha:${home_dir}/profiles/codex-alpha beta:${home_dir}/profiles/codex-beta"
 OPENCODE_PROFILES="alpha:${home_dir}/.config/opencode-profiles/alpha beta:${home_dir}/.config/opencode-profiles/beta"
@@ -120,6 +121,21 @@ readonly PRIMARY_CHECKOUT="${TEMP_ROOT}/primary"
 readonly INSTALLER="${PRIMARY_CHECKOUT}/skills/agent-harness-profiles/scripts/install.sh"
 readonly DOCTOR="${PRIMARY_CHECKOUT}/skills/agent-harness-profiles/scripts/doctor.sh"
 install -d -m 0700 "${TEMP_ROOT}/snapshots" "${TEMP_ROOT}/output" "${TEMP_ROOT}/cases"
+fake_bin="${TEMP_ROOT}/fake-bin"
+install -d -m 0700 "${fake_bin}"
+for executable in claude codex opencode 'deepseek harness'; do
+  cat > "${fake_bin}/${executable}" <<'EOF'
+#!/bin/bash
+if [[ -n "${PROFILE_TEST_CAPTURE:-}" ]]; then
+  printf '%s\n' "$HOME" "$PWD" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$DSH_HOME" \
+    "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$INHERITED_CANARY" \
+    "$OPENCODE_CONFIG" "$@" > "$PROFILE_TEST_CAPTURE"
+fi
+exit "${PROFILE_TEST_STATUS:-0}"
+EOF
+  chmod 0700 "${fake_bin}/${executable}"
+done
+export PATH="${fake_bin}:${PATH}"
 copy_primary_checkout "${PRIMARY_CHECKOUT}"
 export BACKUP_COMMAND="${PRIMARY_CHECKOUT}/backup.sh"
 
@@ -155,33 +171,133 @@ for launcher in \
     fail "generated launcher is missing: ${launcher}"
 done
 printf -v escaped_dsh_path '%q' "${success_home}/profiles/dsh gamma"
-grep -Fq "DSH_HOME=${escaped_dsh_path} command dsh" "${launcher_file}" ||
+printf -v escaped_dsh_command '%q' "${fake_bin}/deepseek harness"
+grep -Fq "DSH_HOME=${escaped_dsh_path} command ${escaped_dsh_command}" "${launcher_file}" ||
   fail 'DSH launcher did not preserve a configured path containing spaces'
-fake_bin="${TEMP_ROOT}/fake-bin"
-opencode_capture="${TEMP_ROOT}/output/opencode-launcher.env"
-opencode_expected="${TEMP_ROOT}/output/opencode-launcher.expected"
-install -d -m 0700 "${fake_bin}"
-cat > "${fake_bin}/opencode" <<'EOF'
-#!/usr/bin/env bash
-printf 'data=%s\nstate=%s\nconfig=%s\narg=%s\n' \
-  "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${XDG_CONFIG_HOME}" "${1:-}" \
-  > "${PROFILE_TEST_CAPTURE}"
-EOF
-chmod 0700 "${fake_bin}/opencode"
+# Every launcher routes two roots without clearing unrelated inherited settings,
+# changing the caller's environment, or losing arguments/exit status.
 (
-  export PATH="${fake_bin}:${PATH}"
-  export PROFILE_TEST_CAPTURE="${opencode_capture}"
+  export HOME="${success_home}" CLAUDE_CONFIG_DIR=inherited-claude CODEX_HOME=inherited-codex
+  export DSH_HOME=inherited-dsh XDG_DATA_HOME=inherited-data XDG_STATE_HOME=inherited-state
+  export XDG_CONFIG_HOME=inherited-config INHERITED_CANARY=keep-me OPENCODE_CONFIG=keep-config-override
+  export PROFILE_TEST_CAPTURE="${TEMP_ROOT}/output/launcher.env"
+  expected="${TEMP_ROOT}/output/launcher.expected"
   # shellcheck disable=SC1090
   source "${launcher_file}"
-  opencode-alpha --synthetic-fixture
+  # The generated functions call executables rather than an unrelated base function.
+  claude() { fail 'base function was called'; }
+  codex() { fail 'base function was called'; }
+  opencode() { fail 'base function was called'; }
+  for tool in claude codex opencode dsh; do
+    for label in alpha beta; do
+      values=(inherited-claude inherited-codex inherited-dsh inherited-data inherited-state inherited-config)
+      root="${success_home}/profiles/${tool}-${label}"
+      case "${tool}" in
+        claude) values[0]="${root}" ;;
+        codex) values[1]="${root}" ;;
+        dsh) values[2]="${root}" ;;
+        opencode)
+          root="${success_home}/.config/opencode-profiles/${label}"
+          values[3]="${root}/share"; values[4]="${root}/state"; values[5]="${root}/config"
+          ;;
+      esac
+      "${tool}-${label}" --synthetic-fixture 'argument with spaces' ''
+      printf '%s\n' "$HOME" "$PWD" "${values[@]}" keep-me keep-config-override \
+        --synthetic-fixture 'argument with spaces' '' > "${expected}"
+      cmp -s -- "${expected}" "${PROFILE_TEST_CAPTURE}" ||
+        fail "${tool}-${label} changed routing, inherited environment, or arguments"
+    done
+  done
+  dsh-gamma
+  grep -Fxq "${success_home}/profiles/dsh gamma" "${PROFILE_TEST_CAPTURE}" || fail 'DSH spaced root was not selected'
+  [[ "$CLAUDE_CONFIG_DIR $CODEX_HOME $DSH_HOME $XDG_DATA_HOME $XDG_STATE_HOME $XDG_CONFIG_HOME" == \
+    'inherited-claude inherited-codex inherited-dsh inherited-data inherited-state inherited-config' ]] ||
+    fail 'launcher changed the parent environment'
+  status=0
+  PROFILE_TEST_STATUS=23 dsh-alpha || status=$?
+  [[ "${status}" == 23 ]] || fail 'launcher lost executable exit status'
 )
-printf 'data=%s\nstate=%s\nconfig=%s\narg=%s\n' \
-  "${success_home}/.config/opencode-profiles/alpha/share" \
-  "${success_home}/.config/opencode-profiles/alpha/state" \
-  "${success_home}/.config/opencode-profiles/alpha/config" \
-  '--synthetic-fixture' > "${opencode_expected}"
-cmp -s -- "${opencode_expected}" "${opencode_capture}" ||
-  fail 'OpenCode launcher did not select all three configured roots'
+
+# Sourcing checks the caller's actual aliases/functions/PATH before any definitions.
+for conflict in function alias executable; do
+  (
+    case "${conflict}" in
+      function) dsh-alpha() { printf 'SPECIAL_WRAPPER\n'; } ;;
+      alias) alias dsh-alpha='printf SPECIAL_ALIAS' ;;
+      executable)
+        printf '#!/bin/sh\nprintf SPECIAL_EXECUTABLE\n' > "${fake_bin}/dsh-alpha"
+        chmod 0700 "${fake_bin}/dsh-alpha"
+        ;;
+    esac
+    before=$(type dsh-alpha 2>/dev/null || alias dsh-alpha)
+    if source "${launcher_file}" 2>"${TEMP_ROOT}/output/conflict-${conflict}.stderr"; then
+      fail "activation accepted a ${conflict} collision"
+    fi
+    [[ "$(type dsh-alpha 2>/dev/null || alias dsh-alpha)" == "${before}" ]] || fail 'activation replaced a special wrapper'
+    ! declare -F claude-alpha >/dev/null || fail 'activation installed functions before refusing a conflict'
+    grep -Fq 'launcher name already exists: dsh-alpha' "${TEMP_ROOT}/output/conflict-${conflict}.stderr" ||
+      fail 'activation did not identify the conflict'
+  )
+done
+expect_failure_without_changes executable-launcher-conflict "${success_case}" "${success_home}" \
+  "${INSTALLER}" --config "${success_config}"
+[[ "$("${fake_bin}/dsh-alpha")" == SPECIAL_EXECUTABLE ]] || fail 'installer changed special executable'
+rm -- "${fake_bin}/dsh-alpha"
+
+# A command may disappear after rendering; activation still refuses it.
+mv -- "${fake_bin}/deepseek harness" "${fake_bin}/held-command"
+(
+  if source "${launcher_file}" 2>"${TEMP_ROOT}/output/missing-command.stderr"; then
+    fail 'activation accepted a missing command'
+  fi
+  ! declare -F claude-alpha >/dev/null || fail 'missing command caused partial activation'
+)
+expect_failure_without_changes missing-profile-command "${success_case}" "${success_home}" \
+  "${INSTALLER}" --config "${success_config}"
+expect_failure_without_changes doctor-missing-profile-command "${success_case}" "${success_home}" \
+  "${DOCTOR}" --config "${success_config}"
+mv -- "${fake_bin}/held-command" "${fake_bin}/deepseek harness"
+
+for tool in CLAUDE CODEX OPENCODE DSH; do
+  invalid_case="${TEMP_ROOT}/cases/invalid-${tool}-command"
+  invalid_home="${invalid_case}/home"
+  invalid_config="${invalid_home}/.config/backup/config"
+  write_full_config "${invalid_home}" "${invalid_config}"
+  printf '%s_COMMAND=relative-command\n' "${tool}" >> "${invalid_config}"
+  expect_failure_without_changes "invalid-${tool}-command" "${invalid_case}" "${invalid_home}" \
+    "${INSTALLER}" --config "${invalid_config}"
+done
+
+# Overrides work for every harness without any default executable on PATH.
+mapping_home="${TEMP_ROOT}/cases/command-mapping/home"
+mapping_config="${mapping_home}/.config/backup/config"
+mapping_launchers="${TEMP_ROOT}/output/command-mapping.sh"
+write_full_config "${mapping_home}" "${mapping_config}"
+for tool in CLAUDE CODEX OPENCODE; do
+  printf '%s_COMMAND=%q\n' "${tool}" "${fake_bin}/deepseek harness" >> "${mapping_config}"
+done
+command_path="${TEMP_ROOT}/commands-without-harnesses"
+install -d -m 0700 "${command_path}"
+for executable in bash dirname git realpath; do
+  ln -s -- "$(type -P "${executable}")" "${command_path}/${executable}"
+done
+HOME="${mapping_home}" PATH="${command_path}" \
+  "${PRIMARY_CHECKOUT}/skills/agent-harness-profiles/scripts/render-launchers.sh" \
+  --config "${mapping_config}" > "${mapping_launchers}"
+(
+  export PATH="${command_path}"
+  source "${mapping_launchers}"
+  for tool in claude codex opencode dsh; do
+    "${tool}-alpha"
+    "${tool}-beta"
+  done
+)
+printf 'unset DSH_COMMAND\n' >> "${mapping_config}"
+expect_failure_without_changes missing-default-dsh "${mapping_home}" "${mapping_home}" \
+  env PATH="${command_path}" "${PRIMARY_CHECKOUT}/skills/agent-harness-profiles/scripts/render-launchers.sh" \
+  --config "${mapping_config}" --check
+grep -Fq 'command unavailable: dsh; configure DSH_COMMAND' "${TEMP_ROOT}/output/missing-default-dsh.stderr" ||
+  fail 'missing default dsh did not give an explicit executable selection remedy'
 for label in alpha beta; do
   opencode_root="${success_home}/.config/opencode-profiles/${label}"
   assert_file "${opencode_root}/config/opencode/opencode.json"

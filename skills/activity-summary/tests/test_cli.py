@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 from conftest import synthetic_config
 
+from activity_summary.config import activate, load
+from activity_summary.scheduled import source_input
+
 PACKAGE = Path(__file__).resolve().parents[1]
 
 
@@ -60,12 +63,24 @@ def test_extract_real_local_git_is_repeatable_and_writes_nothing(tmp_path):
     path.write_text(
         "---\nrepo: example-org/alpha\nnumber: 7\ncreated: '2024-01-02T09:00:00Z'\ntitle: Synthetic issue\nurl: https://github.com/example-org/alpha/issues/7\ntype: gh-issue\n---\n"
     )
+    history = root / "sources/selected-history/2024-01-02_session.md"
+    history.parent.mkdir(parents=True)
+    history.write_text(
+        "# Synthetic work\n\n"
+        "- Session ID: `01234567-89ab-cdef-0123-456789abcdef`\n\n"
+        "### 2024-01-02 10:00:00Z -- user\n\n> Review the synthetic change.\n\n"
+        "### 2024-01-02 10:01:00Z -- assistant\n\nSynthetic response.\n"
+    )
     subprocess.run(["git", "-C", str(root), "add", "."], check=True, env=env)
     subprocess.run(
         ["git", "-C", str(root), "commit", "-qm", "sync: synthetic source"], check=True, env=env
     )
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps(synthetic_config(root)))
+    selected = synthetic_config(root)
+    selected["facts"]["session_sources"] = [
+        {"directory": "sources/selected-history", "label": "selected", "format": "history"}
+    ]
+    cfg.write_text(json.dumps(selected))
     before = {
         str(item.relative_to(root)): hashlib.sha256(item.read_bytes()).hexdigest()
         for item in root.rglob("*")
@@ -77,6 +92,15 @@ def test_extract_real_local_git_is_repeatable_and_writes_nothing(tmp_path):
     assert first.stdout == second.stdout
     data = json.loads(first.stdout)
     assert list(data["gh_touched_today"]) == ["example-org/alpha#7"]
+    loaded = load(cfg)
+    activate(loaded)
+    scheduled_blob, scheduled_data, missing = source_input(loaded, "daily", root, "2024-01-02")
+    assert scheduled_data["human_cluster_count"] == 1
+    cluster = scheduled_data["session_clusters"][0]
+    assert cluster["user_prompts"] == ["Review the synthetic change."]
+    assert [session["source"] for session in cluster["sessions"]] == ["selected"]
+    assert missing == []
+    assert first.stdout == scheduled_blob
     after = {
         str(item.relative_to(root)): hashlib.sha256(item.read_bytes()).hexdigest()
         for item in root.rglob("*")

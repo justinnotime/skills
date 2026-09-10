@@ -49,7 +49,8 @@ Optional fields:
 | `github.automatic_review_markers` | Comments excluded from substantive review evidence |
 | `watched_repositories` | List of objects containing `path`, `kind` (`checkout` or `bare-hub`), and optional `exempt` paths |
 | `watcher_exceptions_file`, `bus.watcher_exceptions` | Caller-approved watcher exceptions for task and transport inspection |
-| `turn_report.seats_file` | JSON enrollment list for mechanical turn reporting |
+| `turn_report.enabled` | `true` reports the caller's active registration in the selected fleet without an enrollment list; `false` disables reporting; omitted retains explicit list enrollment |
+| `turn_report.seats_file` | JSON array of enrolled identity IDs, used only when `turn_report.enabled` is omitted; no file means no reporting |
 | `seat_trailer` | Explicit ledger, member command, window vocabulary, host selector and Git trailer key; see [commit attribution](commit-attribution.md) |
 | `commands.brief` | Optional caller-owned startup briefing command |
 | `handoff.directory`, `handoff.publish_command` | Local handoff storage and optional external publication |
@@ -61,6 +62,15 @@ Existing `NW_*`, `AGENT_BUS_*`, `MATRIX_BUS_*`, `NOTES_RUNTIME_DIR`, and
 not require a particular repository. Named profile commands apply their complete
 environment before importing runtime code; keep the same selector throughout
 an operation.
+
+Turn reporting remains opt-in. To stop maintaining a list of identity IDs that
+changes on re-registration, explicitly set `"turn_report": {"enabled": true}`.
+This takes precedence over `seats_file` and the compatible `NW_TURN_CANARY_FILE`
+override; it requires an active, unexpired Agent Bus registration, not just an
+`ORC_SEAT_ID` value. Leave `enabled` absent to retain existing list-based policy.
+`NW_TURN_REPORT_OFF=1` disables every mode. Neither installing hooks nor a missing
+enrollment file enables reporting. These are same-user reporting preferences,
+not a security boundary or proof that an agent is responsive.
 
 PRs must be registered explicitly in their owning fleet. The former
 `github.owner_defaults_file`, `github.excluded_title_prefixes`,

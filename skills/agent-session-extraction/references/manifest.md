@@ -129,6 +129,17 @@ the latter counts the retained user and assistant events together.
 
 ## Policies and output
 
+`event_policy.peer_agent_prefixes` and `peer_agent_exact` are caller-owned,
+case-sensitive rules applied to trimmed user-like text after retention.
+Prefixes match only the beginning of the text; exact rules match the entire
+text. They relabel events without discarding history. For an integration that
+reserves the literal `[Agent Bus wake]` prefix, add that string to
+`peer_agent_prefixes` alongside the caller's other machine prefixes. Do not add
+it to `synthetic_prefixes` if the wake must remain in history. These rules are
+global to the manifest, not per-source overrides; all declared harnesses must
+agree on their meaning. See [input role versus authorship](normalized-session.md#input-role-is-not-authorship)
+for quoting behavior and the limit of text-only classification.
+
 - `ownership.mode`: `owner` or `aggregator`.
 - `event_policy`: synthetic prefixes, peer-agent rules, retention thresholds,
   and conversational-subagent retention.
@@ -221,6 +232,31 @@ the latter counts the retained user and assistant events together.
   throwaway worktree.
 - `gates`: required source behavior plus mandatory redaction, output audit,
   reconciliation, and pre-publication scan controls.
+
+### Reclassifying existing archives
+
+A peer-rule change is applied again to source records on each extraction; it
+does not require new source bytes or a policy-version cache. Managed history
+and prompt files are rendered again as needed at their existing paths, even
+when `legacy-agent-markdown-frozen/v1` is configured. If no normalized human
+input remains in a session or day, its managed prompt file is removed and its
+history is retained. Indexes reflect the resulting inventory. The original
+source database or transcript is never removed by this output operation.
+
+The freeze applies to recognized legacy prompt files without the shared
+`Managed-By` header, not to current managed output. It deliberately preserves
+old prompt bytes even after a role-policy change. To repair these files, the
+caller must explicitly switch to `legacy-agent-markdown/v1`, retaining legacy
+recognition while allowing rewrite/removal. Switching directly to `none` does
+not adopt unmanaged files and can fail output audit. Preview the change with
+`scripts/extract --manifest PATH --dry-run` before authorized publication.
+
+Legacy prompts paired to history by ownership and filename can be refreshed
+or removed after the freeze ends. An identity-less legacy prompt whose only
+match was its old human-event content may no longer match after reclassification;
+it remains preserved rather than being guessed into a session. Such orphans
+need a separately reviewed consumer migration. Reconciliation establishes
+history coverage, not correctness or freshness of preserved legacy prompts.
 
 Every custom redaction regex has a public synthetic canary. The regex and
 canary may live in a private consumer manifest; do not encode a real

@@ -1,6 +1,6 @@
 ---
 name: agent-harness-profiles
-description: Configure, install, inspect, or migrate named isolated roots for Claude Code, Codex, OpenCode, and DeepSeek Harness. Use for generated launchers, shared Skill discovery, or compatible Backup setup; profile names and meanings must come from caller-owned configuration.
+description: Configure or inspect named root-selection launchers for Claude Code, Codex, OpenCode, and DeepSeek Harness. Use for caller-configured roots and executable selection; full onboarding, accounts, discovery, hooks, and backup authorization belong to agent-harness-integration.
 ---
 
 # Agent Harness Profiles
@@ -46,10 +46,57 @@ The installer:
    links `~/bin/backup` to that command; otherwise leaves that entry unchanged;
 6. runs the doctor.
 
-It does not edit shell startup files, install services or schedulers, start a
-process, move state roots, or copy authentication data. Review the generated
-launcher file before sourcing it. Plain upstream commands continue to select
-their native default roots.
+It does not source launchers, edit shell startup files, install services or
+schedulers, start a process, move state roots, or copy authentication data.
+Review the generated launcher file before sourcing it in Bash. Plain upstream
+commands are unchanged and continue to honor their inherited environment.
+
+## Executable selection
+
+For each configured harness, the default executable name is `claude`, `codex`,
+`opencode`, or `dsh` on PATH. If that name is unavailable or not the intended
+executable, explicitly configure one absolute executable path per harness:
+
+```bash
+CLAUDE_COMMAND="/absolute/path/to/claude"
+CODEX_COMMAND="/absolute/path/to/codex"
+OPENCODE_COMMAND="/absolute/path/to/opencode"
+DSH_COMMAND="/absolute/path/to/deepseek-harness"
+```
+
+These optional values accept neither command strings nor argument lists. They
+apply only to configured profiles, not plain commands, and do not select accounts.
+The installer does not create or replace executable wrappers. A caller-selected
+existing wrapper must itself honor the supplied root variables; checking that a
+file is executable does not verify its behavior or authentication.
+
+Rendering, installer preflight, and the doctor reject unavailable executables and
+launcher names already visible to their process. Sourcing the generated file
+checks again in the calling shell, including its unexported functions and aliases,
+before defining any launchers. For example, an existing `dsh-work` executable,
+alias, or function is preserved and activation is refused. Choose another opaque
+label or deliberately resolve the conflict yourself; a command override does not
+bypass name conflicts. Sourcing twice also refuses the existing functions: use a
+fresh shell for a regenerated file rather than silently replacing active functions.
+
+Launchers override only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `DSH_HOME`, or OpenCode's
+three XDG roots for the child command. All other inherited environment, arguments,
+working directory, and the command's exit status are preserved. In particular,
+inherited authentication and explicit OpenCode config overrides are not cleared.
+
+## Authority boundaries
+
+Root selection is not account selection, a guarantee of isolated authentication,
+full Skill discovery, hook setup, or authorization to back up or extract sessions.
+This installer links only this Skill into shared and Claude roots; it does not
+populate Codex, OpenCode, or DeepSeek Harness discovery roots with other Skills.
+Use `agent-harness-integration` for full onboarding and verification of those
+separate choices. This delegation is by Skill name, not a sibling code import.
+
+The shared legacy `*_PROFILES` values also declare sources to an independently
+run backup command. Review that coverage explicitly before changing those values;
+creating or selecting a launcher does not itself run or expand a backup. Linking
+`BACKUP_COMMAND` does not authorize schedules, new coverage, or credential copying.
 
 For diagnosis without mutation, run `scripts/doctor.sh --config FILE`. Use
 `scripts/render-launchers.sh --config FILE` to inspect generated text on stdout.

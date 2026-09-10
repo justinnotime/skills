@@ -330,8 +330,57 @@ services and schedules remain outside this package.
 
 Harness integrations are in `plugins/`. Turn-report plugins call the installed
 `orc-turn-report` executable, or `ORC_TURN_REPORT_COMMAND` when set. Reporting is
-limited by the configured enrolled-identity file. Installing a plugin does not
+opt-in through `turn_report.enabled` or the compatible enrolled-identity file;
+see [configuration](configuration.md). Installing a plugin does not
 prove an existing process loaded it; reload through the harness's normal process.
+
+`python3 -B scripts/orc-turn-report.py` and the installed launcher select the
+same actual tmux fleet as Agent Bus before loading reporting configuration or
+database paths. Both accept `--config FILE` and `--fleet NAME`; an inherited
+explicit command selection remains effective for descendants. Without an
+explicit configuration they use the normal XDG configuration location. A direct
+hook does not need a launcher-specific environment prefix when that default
+location already selects the intended private configuration. Keep a prefix or
+`--config` when using a nondefault configuration. Selection or reporting failure
+does not block the harness, and does not retry against the default fleet.
+
+### Codex hooks
+
+From the installed package directory, these existing entry points write only
+the selected Codex configuration in local transport mode:
+
+```bash
+python3 -B scripts/install-agent-bus-pull-notify.py --config /private/runtime.json
+bash scripts/stage-codex-turn-hooks.sh --config /private/runtime.json
+```
+
+Both honor `TURN_HOOKS_CODEX_CONFIG` first, then `$CODEX_HOME/config.toml`, then
+`$HOME/.codex/config.toml`. The first installs the Agent Bus `Stop` reminder;
+Matrix mode can also install/start the explicitly configured dispatcher service.
+The second stages the reporter's native `UserPromptSubmit` and `Stop` entries,
+adding only a missing event and preserving existing entries. It saves
+`config.toml.bak.turn-hooks` before a change and refuses to overwrite that backup.
+Inspect existing reporter commands when changing package location or runtime
+configuration; staging is not an automatic migration of those commands.
+No new installer, hook trust, feature override or harness restart is needed to
+select a different reporting policy in the private runtime file.
+
+The Stop installer recognizes an identical parsed command even if Codex moved
+its comment marker into a later event. It leaves that configuration unchanged,
+including disabled/trusted rows and event positions. It does not deduplicate
+pre-existing multiple definitions or edit other hook sources.
+
+Codex's [native hook contract](https://learn.chatgpt.com/docs/hooks) loads hooks
+from active configuration layers, including inline TOML and adjacent `hooks.json`;
+matching definitions accumulate rather than replace one another. Avoid installing
+the same hook in both representations. User hooks require review of the exact
+definition through `/hooks`; changing the definition can invalidate trust.
+Project hooks additionally depend on project configuration trust.
+`features.hooks = false` disables hooks; these installers never override it or
+write `hooks.state`. After authorized installation, load the configuration through
+Codex's normal process and inspect `/hooks`. Disk configuration is not evidence
+that an existing process loaded it or emitted a turn report. `Stop` runs before
+the turn finishes, not as a wake mechanism for an already idle session.
 
 Run package checks with synthetic inputs:
 

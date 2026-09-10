@@ -37,8 +37,11 @@ Additional roots must use the layout produced by the upstream tool:
 The state-backup command begins once a source directory exists and never creates
 accounts, shell launchers, application roots, services, or Skill links. The
 separate `agent-harness-profiles` Skill can explicitly create launchers, empty
-profile roots, and Skill links from these same configured values; merely running
-`backup.sh` never invokes that installer.
+profile roots, and its own shared/Claude Skill links from these same configured
+values; merely running `backup.sh` never invokes that installer. Root selection
+does not establish account identity, full Skill discovery, hooks, or extraction
+access. Use `agent-harness-integration` for full onboarding with separately
+approved backup coverage; neither Skill automatically adds sources or credentials.
 
 ## Per-machine configuration
 
@@ -127,8 +130,21 @@ backup tool and remain the operator's responsibility.
 
 ## Consistency and safety
 
-- opencode SQLite databases use `sqlite3 .backup` when available; otherwise
-  the script copies the database and WAL companions with a warning.
+- Discovered opencode SQLite databases require `sqlite3 .backup`. Missing sqlite3,
+  snapshot failures, and replacement failures mark that profile incomplete. The
+  script continues other databases, profiles, and harnesses, then exits nonzero.
+  It never falls back to copying a live database or its WAL companions.
+- Each snapshot is created under a unique temporary name in its destination
+  directory and atomically renamed only after `.backup` succeeds. Failure keeps
+  the previous good snapshot; exit and handled signals clean up that invocation's
+  temporary files. SIGKILL or power loss may leave an unpublished temporary file.
+- Overlapping runs do not share temporary names or delete each other's files.
+  The last successful rename wins; snapshots are not ordered by source freshness.
+  The rest of the backup is not transactional. Serialize jobs if ordering is
+  required, and restore from a separate copy rather than opening a destination
+  database while backup runs.
+- Old WAL/SHM files from earlier raw-copy backups are not migrated or deleted.
+  Restore new standalone `.backup` snapshots without those legacy companions.
 - DSH rejects unsafe labels, non-absolute additional roots, source/destination
   nesting, and symlinked destinations.
 - The backup is incremental and does not delete old destination files.

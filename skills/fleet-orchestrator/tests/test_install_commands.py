@@ -8,7 +8,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def install(target, *args):
-    return subprocess.run([sys.executable, str(SCRIPTS / "install"),
+    return subprocess.run([sys.executable, "-B", str(SCRIPTS / "install"),
                            "--bin-dir", str(target), *args],
                           text=True, capture_output=True)
 

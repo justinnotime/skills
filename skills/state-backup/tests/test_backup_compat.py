@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +34,9 @@ BACKUP_ENVIRONMENT_VARIABLES = {
     "CURSOR_HOME",
     "CURSOR_USER_DIR",
     "DSH_BACKUP_PREFIX",
+    "DSH_BACKUP_DIR",
+    "DSH_HOME",
+    "DSH_INCLUDE_DEFAULT",
     "DSH_PROFILES",
     "MACHINE_ID",
     "OPENCLAW_BACKUP_DIR",
@@ -117,7 +124,7 @@ exit 97
         )
 
     def _run_backup(
-        self, *, through_home_symlink: bool = False
+        self, *, through_home_symlink: bool = False, expected_status: int = 0
     ) -> subprocess.CompletedProcess[str]:
         command = BACKUP_SCRIPT
         if through_home_symlink:
@@ -136,10 +143,165 @@ exit 97
         )
         self.assertEqual(
             result.returncode,
-            0,
+            expected_status,
             f"backup command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
         )
         return result
+
+    def _database_fixture(self) -> tuple[Path, Path]:
+        source = self.home / ".local/share/opencode/opencode.db"
+        destination = self.home / "syncthing/backup/fixture-node/opencode/db/opencode.db"
+        self._write_file(source, "synthetic source\n")
+        self._write_file(destination, "previous good snapshot\n")
+        self._write_file(Path(f"{source}-wal"), "never raw copy WAL\n")
+        self._write_file(self.home / ".dsh/sessions/later.jsonl", "{}\n")
+        self._write_file(self.home / ".config/opencode/opencode.json", "{}\n")
+        return source, destination
+
+    def _sqlite_stub(self, body: str) -> None:
+        command = self.command_directory / "sqlite3"
+        command.write_text(
+            '#!/bin/bash\ntarget=${2#\'.backup "\'}\ntarget=${target%\'"\'}\n' + body,
+            encoding="utf-8",
+        )
+        command.chmod(0o755)
+
+    def _assert_database_failure(self, destination: Path, result: subprocess.CompletedProcess) -> None:
+        self.assertEqual(destination.read_text(), "previous good snapshot\n")
+        self.assertEqual(list(destination.parent.iterdir()), [destination])
+        self.assertIn("opencode (default) backup incomplete", result.stdout)
+        self.assertNotIn("opencode (default) backup completed", result.stdout)
+        self.assertNotIn("Backup complete!", result.stdout)
+        self.assertIn("Backup incomplete: 1 configured target(s) failed", result.stdout)
+        calls = self._recorded_rsync_calls()
+        self.assertIn(str(self.home / ".dsh") + "/", calls)
+        self.assertIn(str(self.home / ".config/opencode") + "/", calls)
+        self.assertNotIn("opencode.db", calls)
+        log = self.home / ".local/log/backup.log"
+        self.assertIn("Backup incomplete:", log.read_text())
+
+    def test_missing_sqlite_preserves_snapshot_and_continues_other_harnesses(self) -> None:
+        _, destination = self._database_fixture()
+        for name in ("mkdir", "dirname", "date", "tee", "find", "wc", "du", "cut", "basename"):
+            (self.command_directory / name).symlink_to(shutil.which(name))
+        self.environment["PATH"] = str(self.command_directory)
+        result = self._run_backup(expected_status=1)
+        self.assertIn("sqlite3 is required", result.stdout)
+        self._assert_database_failure(destination, result)
+
+    def test_failed_sqlite_removes_partial_snapshot_and_continues(self) -> None:
+        _, destination = self._database_fixture()
+        self._sqlite_stub(
+            'for suffix in "" -journal -wal -shm; do printf partial > "$target$suffix"; done\n'
+            'exit 1\n'
+        )
+        result = self._run_backup(expected_status=1)
+        self._assert_database_failure(destination, result)
+
+    def test_failed_first_snapshot_publishes_nothing(self) -> None:
+        _, destination = self._database_fixture()
+        destination.unlink()
+        self._sqlite_stub('printf partial > "$target"\nexit 1\n')
+        self._run_backup(expected_status=1)
+        self.assertEqual(list(destination.parent.iterdir()), [])
+
+    def test_directory_at_snapshot_path_is_not_a_successful_replacement(self) -> None:
+        _, destination = self._database_fixture()
+        destination.unlink()
+        destination.mkdir()
+        self._sqlite_stub('printf snapshot > "$target"\n')
+        self._run_backup(expected_status=1)
+        self.assertEqual(list(destination.iterdir()), [])
+        self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_interrupted_sqlite_cleans_its_temporary_snapshot(self) -> None:
+        _, destination = self._database_fixture()
+        self._sqlite_stub('printf partial > "$target"\nkill -TERM "$PPID"\nexit 1\n')
+        result = self._run_backup(expected_status=1)
+        self._assert_database_failure(destination, result)
+
+    def test_failed_rename_preserves_previous_snapshot(self) -> None:
+        _, destination = self._database_fixture()
+        self._sqlite_stub('printf complete > "$target"\n')
+        command = self.command_directory / "mv"
+        command.write_text("#!/bin/sh\nexit 1\n")
+        command.chmod(0o755)
+        result = self._run_backup(expected_status=1)
+        self._assert_database_failure(destination, result)
+
+    def test_failed_profile_does_not_block_later_database_or_profile(self) -> None:
+        source, destination = self._database_fixture()
+        self._write_file(source.parent / "second.db")
+        additional = self.home / "additional"
+        self._write_file(additional / "share/opencode/other.db")
+        self._write_config({"OPENCODE_PROFILES": f"extra:{additional}"})
+        self._sqlite_stub(
+            'printf snapshot > "$target"\n'
+            '[[ "$1" != */opencode.db ]]\n'
+        )
+        result = self._run_backup(expected_status=1)
+        self.assertEqual(destination.read_text(), "previous good snapshot\n")
+        self.assertEqual((destination.parent / "second.db").read_text(), "snapshot")
+        self.assertEqual(
+            (destination.parents[2] / "opencode-extra/db/other.db").read_text(), "snapshot"
+        )
+        self.assertIn("opencode (extra) backup completed", result.stdout)
+        self.assertIn("Backup incomplete: 1 configured target(s) failed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 CLI required for real WAL snapshot test")
+    def test_real_wal_snapshot_is_atomic_and_handles_quoted_destination(self) -> None:
+        source, _ = self._database_fixture()
+        source.unlink()
+        Path(f"{source}-wal").unlink()
+        destination = self.test_root / 'backup with spaces and \'quotes"\\' / "db/opencode.db"
+        self._write_file(destination, "previous good snapshot\n")
+        self._write_config({"OPENCODE_BACKUP_DIR": str(destination.parent.parent)})
+        with closing(sqlite3.connect(source)) as connection:
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+            connection.execute("CREATE TABLE sessions (value TEXT)")
+            connection.execute("INSERT INTO sessions VALUES ('committed in WAL')")
+            connection.commit()
+            with destination.open() as previous_reader:
+                self._run_backup()
+                self.assertEqual(previous_reader.read(), "previous good snapshot\n")
+            with closing(sqlite3.connect(destination)) as snapshot:
+                self.assertEqual(snapshot.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+                self.assertEqual(snapshot.execute("SELECT value FROM sessions").fetchall(), [("committed in WAL",)])
+        self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_concurrent_failure_cannot_remove_another_runs_good_snapshot(self) -> None:
+        _, destination = self._database_fixture()
+        ready = self.test_root / "ready"
+        release = self.test_root / "release"
+        self._sqlite_stub(
+            'printf complete > "$target"\n'
+            'if [[ -n "${HOLD_SNAPSHOT:-}" ]]; then\n'
+            '  touch "$HOLD_SNAPSHOT/ready"\n'
+            '  while [[ ! -f "$HOLD_SNAPSHOT/release" ]]; do sleep 0.02; done\n'
+            '  exit 1\n'
+            'fi\n'
+        )
+        environment = dict(self.environment, HOLD_SNAPSHOT=str(self.test_root))
+        process = subprocess.Popen(
+            [str(BACKUP_SCRIPT)], cwd=self.home, env=environment,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "first snapshot never started")
+            self.assertEqual(destination.read_text(), "previous good snapshot\n")
+            self.assertEqual(len(list(destination.parent.glob(".opencode-backup.*"))), 1)
+            self._run_backup()
+            self.assertEqual(destination.read_text(), "complete")
+            self.assertEqual(len(list(destination.parent.glob(".opencode-backup.*"))), 1)
+        finally:
+            release.touch()
+            stdout, stderr = process.communicate(timeout=20)
+        self.assertEqual(process.returncode, 1, stdout + stderr)
+        self.assertEqual(destination.read_text(), "complete")
+        self.assertEqual(list(destination.parent.iterdir()), [destination])
 
     def _recorded_rsync_calls(self) -> str:
         return self.rsync_log.read_text(encoding="utf-8")

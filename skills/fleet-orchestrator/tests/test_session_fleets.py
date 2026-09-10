@@ -285,6 +285,43 @@ class SessionFleetTest(unittest.TestCase):
         actual = json.loads(self.run_command([BUS, "environment"], env=dead).stdout)
         self.assertEqual(actual["database"], self.view("beta")["agent_bus_db"])
 
+    def test_direct_and_installed_turn_reporter_follow_registration_fleet(self):
+        self.native_session("alpha")
+        self.native_session("beta")
+        identity = self.join("beta", "reporter-worker")
+        config = json.loads(self.config.read_text())
+        # This path resolves differently after selecting the actual fleet.
+        config["turn_report"] = {"seats_file": "${NOTES_RUNTIME_DIR}/enrolled.json"}
+        self.config.write_text(json.dumps(config))
+        view = self.view("beta")
+        (Path(view["runtime_dir"]) / "enrolled.json").write_text(json.dumps([identity]))
+        env = {**self.session_environment("beta"), "NW_FLEET": "alpha",
+               "NW_FLEET_PROFILE_APPLIED": "alpha", "NOTES_RUNTIME_DIR": str(self.root / "wrong"),
+               "NW_FLEET_COMMAND_SCOPE": "99999999|0|alpha"}
+        launcher = self.root / "commands with spaces/orc-turn-report"
+        self.run_command([sys.executable, "-B", ROOT / "scripts/install",
+                          "--command", "orc-turn-report", "--target", launcher])
+        for command in ([sys.executable, "-B", ROOT / "scripts/orc-turn-report.py"], [launcher]):
+            for event in ("UserPromptSubmit", "Stop"):
+                result = subprocess.run([str(x) for x in [*command, "--harness", "codex"]],
+                                        env=env, input=json.dumps({"hook_event_name": event}),
+                                        text=True, capture_output=True, timeout=10, check=False)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        with sqlite3.connect(view["dispatch_ledger_db"]) as conn:
+            self.assertEqual(conn.execute("SELECT seat, starts, ends FROM seat_presence").fetchall(),
+                             [(identity, 2, 2)])
+        self.assertFalse((self.root / "default/tasks.sqlite3").exists())
+        self.assertFalse((self.root / "wrong").exists())
+        self.assertFalse((self.root / "fleets/alpha").exists())
+        # An explicit descendant selection is respected even from beta's pane.
+        selected = self.run_command([
+            sys.executable, "-B", ROOT / "scripts/lib/fleet-profile.py", "exec", "default", "--",
+            sys.executable, "-B", ROOT / "scripts/orc-turn-report.py", "--kind", "start",
+        ], env=env)
+        self.assertEqual(selected.stdout, "")
+        with sqlite3.connect(view["dispatch_ledger_db"]) as conn:
+            self.assertEqual(conn.execute("SELECT starts FROM seat_presence").fetchone(), (2,))
+
     def test_rename_preserves_running_processes_and_history_after_reopen(self):
         self.run_command([ORC, "fleet", "start", "alpha"])
         self.native_session("beta")

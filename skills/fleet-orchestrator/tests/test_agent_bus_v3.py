@@ -357,6 +357,23 @@ class AgentBusV3Test(unittest.TestCase):
             bus.cmd_members(argparse.Namespace())
         return [json.loads(line) for line in output.getvalue().splitlines() if line]
 
+    def test_members_slot_comes_from_local_row_not_remote_metadata(self):
+        joined = self.join("host/worker", "opencode:/project")
+        self.assertNotIn("slot", self.states[joined["agent_id"]],
+                         "slots must not be published as remote registration facts")
+        remote = dict(self.states[joined["agent_id"]], slot="untrusted-remote-slot")
+        remote_only = dict(remote, agent_id="remote-only", handle="remote/worker")
+        # Finish the join's WAL checkpoint before comparing read-only bytes.
+        with contextlib.closing(sqlite3.connect(bus.DB_PATH)) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        before = bus.DB_PATH.read_bytes()
+        with mock.patch.object(bus, "room_members", return_value=[remote, remote_only]), \
+                mock.patch.object(bus, "db", side_effect=AssertionError("unexpected writer")):
+            members = {member["agent_id"]: member for member in self.members()}
+        self.assertEqual(members[joined["agent_id"]]["slot"], joined["slot"])
+        self.assertNotIn("slot", members["remote-only"])
+        self.assertEqual(bus.DB_PATH.read_bytes(), before)
+
     def make_heartbeat_due(self, agent_id):
         conn = bus.db()
         conn.execute("UPDATE identities SET lease_until_ms=? WHERE agent_id=?",
@@ -1427,6 +1444,7 @@ class AgentBusLocalTransportTest(unittest.TestCase):
         self.assertEqual(read.call_count, 1)
         self.assertEqual(observe.call_count, 1)
         self.assertEqual(json.loads(output.getvalue())["agent_id"], joined["agent_id"])
+        self.assertEqual(json.loads(output.getvalue())["slot"], joined["slot"])
 
     def test_derived_session_refresh_requires_matching_durable_fleet_scope(self):
         expected = {

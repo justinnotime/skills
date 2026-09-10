@@ -372,7 +372,7 @@ def local_member_rows() -> list[sqlite3.Row]:
             conn.execute("PRAGMA query_only=ON")
             cursor = conn.execute("SELECT * FROM identities ORDER BY agent_id")
             required = {
-                "agent_id", "handle", "aliases_json", "generation", "status",
+                "agent_id", "slot", "handle", "aliases_json", "generation", "status",
                 "harness", "mode", "host", "tmux", "updated_ms", "lease_until_ms",
                 "pane_id", "heartbeat_fails", "heartbeat_last_error",
             }
@@ -920,6 +920,10 @@ def member_view(member: dict[str, Any], local: dict[str, sqlite3.Row], now: dt.d
     else:
         view["heartbeat_overdue"] = None
     row = local.get(str(member.get("agent_id")))
+    # A resume slot belongs to this selected database, never remote metadata.
+    view.pop("slot", None)
+    if row is not None:
+        view["slot"] = row["slot"]
     if row is not None and (row["heartbeat_fails"] or 0) >= HEARTBEAT_FAIL_FLAG_THRESHOLD:
         view["heartbeat_failing"] = row["heartbeat_fails"]
         view["heartbeat_last_error"] = row["heartbeat_last_error"]

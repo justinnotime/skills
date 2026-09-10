@@ -19,6 +19,11 @@ For moving an existing implementation into an independent Skill, see the
 configuration, duplicate-code removal, installation and verification on each
 machine.
 
+For adding a harness, profile or machine, start with
+[agent-harness-integration](skills/agent-harness-integration/SKILL.md). It connects
+the existing owners and their acceptance checks without another installer or
+per-harness scheduler.
+
 ## Repository name transition
 
 The GitHub repository was renamed from `backup` to `skills`, and the examples
@@ -54,6 +59,7 @@ reusing that name removes the redirect.
 | `skills/remote-clipboard/` | Remote-to-local clipboard Skill and shell function |
 | `clip.sh` | Stable compatibility link for the clipboard shell helper |
 | `skills/agent-harness-profiles/` | Configuration-driven launcher and Skill-link setup |
+| `skills/agent-harness-integration/` | Cross-mechanism harness onboarding and behavior acceptance |
 | `skills/agent-session-extraction/` | Manifest-driven extraction Skill and command wrappers |
 | `skills/github-archive/` | Configured GitHub archives with local issue dependency graphs, timelines and inventories |
 | `skills/teams-archive/` | Caller-configured Teams chat, card, and attachment archive |
@@ -173,8 +179,8 @@ dependencies, and selected telemetry identifiers are excluded. Custom secrets
 stored under arbitrary names cannot be detected reliably; review local config
 before synchronizing a new source.
 
-OpenCode databases use `sqlite3 .backup` when available. Without `sqlite3`, the
-script falls back to copying the database and WAL companions with a warning.
+OpenCode databases require `sqlite3 .backup`; failed snapshots preserve the
+previous backup and fail the run. See the [consistency contract](PROFILES.md#consistency-and-safety).
 
 ## Syncthing
 

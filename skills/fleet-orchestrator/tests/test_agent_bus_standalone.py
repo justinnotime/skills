@@ -84,6 +84,7 @@ class StandaloneBusTests(unittest.TestCase):
         before = database.read_bytes()
         members = [json.loads(line) for line in self.run_bus("members").stdout.splitlines()]
         self.assertEqual([member["agent_id"] for member in members], [joined["agent_id"]])
+        self.assertEqual([member["slot"] for member in members], ["reader"])
         self.assertEqual(database.read_bytes(), before)
         with sqlite3.connect(database) as conn:
             self.assertIsNone(conn.execute(
@@ -102,6 +103,25 @@ class StandaloneBusTests(unittest.TestCase):
                 self.assertIn("Agent Bus members unavailable", result.stderr)
                 self.assertEqual(database.read_bytes(), content)
                 self.assertFalse((self.base / "bus").exists())
+
+    def test_members_slot_follows_only_the_selected_existing_database(self):
+        joined = json.loads(self.run_bus(
+            "join", "host/worker", "opencode:/project", "test", "pull", "host", "no-tmux"
+        ).stdout)
+        first = self.base / "state" / "bus.sqlite3"
+        second = self.base / "state" / "other.sqlite3"
+        with sqlite3.connect(first) as source, sqlite3.connect(second) as target:
+            source.backup(target)
+            target.execute("UPDATE identities SET slot='opencode:/different'")
+        config = json.loads(self.config.read_text())
+        for database, slot in ((first, "opencode:/project"), (second, "opencode:/different")):
+            config["bus"]["database"] = str(database)
+            self.config.write_text(json.dumps(config))
+            before = {path: path.read_bytes() for path in (first, second)}
+            members = [json.loads(line) for line in self.run_bus("members").stdout.splitlines()]
+            self.assertEqual([(member["agent_id"], member["slot"]) for member in members],
+                             [(joined["agent_id"], slot)])
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
 
 
 if __name__ == "__main__":

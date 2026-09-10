@@ -49,6 +49,12 @@ renumbering windows does not move a message to another agent. `registration_tmux
 preserves the original fact; `terminal_presence` reports present, absent or
 unknown. Present means that terminal exists, not that the model is responsive.
 
+The read-only `members` output includes `slot` only for identities with an
+existing local row in the selected database. Its value comes directly from that
+row, including when other member facts arrive through Matrix. A remote-only
+member has no `slot` in this output; remote metadata cannot supply or override
+it. Reading members does not create identities, repair schemas, or migrate data.
+
 Old local registrations without a server binding report unknown until normal
 onboarding binds the real terminal again. No peer identity is silently changed.
 For an operator-authorized Matrix-to-local migration, retain the existing task
@@ -76,6 +82,96 @@ that boundary has passed. OpenCode's plugin manages its watcher, while Claude
 Code uses the watcher selected during onboarding. Follow any missing integration
 diagnostic and activate the selected harness configuration before claiming
 delivery works. Do not start another session's watcher or copy its slot.
+
+### OpenCode conversation binding
+
+The OpenCode plugin requires a dedicated terminal-backed instance. It does not
+choose the latest stored conversation. The first chat message or bus-tool call
+whose session the SDK confirms is a root session in the plugin's project and
+directory selects the conversation. The selection is permanent for that plugin
+instance; child sessions and other roots cannot redirect delivery or use its bus
+tools. Merely opening an idle saved conversation does not register or lease mail
+until a qualifying message/tool call occurs. A shared server receiving unrelated
+root conversations cannot identify which attached terminal owns the first event;
+that deployment is not supported.
+
+For new registrations without `AGENT_BUS_SLOT`, the resume slot hashes the hostname, resolved bus
+database, tmux socket/server generation and exact pane, working directory, and
+OpenCode root session ID. The bus environment and tmux session observation are
+the authorities; there is no separate identity registry. Restarting OpenCode in
+the same pane with the same root reuses the slot despite a different OpenCode
+process ID, window title, or window number. A different pane, fleet store, tmux
+server generation, directory, or root produces a different slot. The bus still
+enforces one active identity per pane. Starting a different root does not retire
+the predecessor or bypass checkout/succession requirements.
+
+For a shipped directory-only default, the plugin first reads members from the
+selected database. It adopts exactly `opencode:${directory}` only when that
+registration is active, identifies OpenCode in watch mode, and matches the
+hostname, exact pane, and observed tmux server generation. Local transport also
+requires `terminal_presence=present`. The database and transport must still
+match after the read. Adoption uses the existing `agent_id` without `setup` or
+`join`, preserving its handle, inbox, and presentation leases. Other panes or
+directories are never adopted; new registrations keep hashed slots. An
+unavailable/ambiguous member snapshot or a same-pane record without a local
+`slot` is not permission to guess ownership.
+
+This is restart-time continuation, not a concurrent takeover of an old plugin
+process. Expired registrations omitted by `members`, retired identities, and
+registrations without a verified server generation require explicit recovery.
+The old slot contains no historical root conversation ID, so adoption can only
+bind the newly selected, validated root; it cannot prove which root was used
+before the upgrade. No cross-directory or cross-pane relocation is inferred.
+
+An explicit `AGENT_BUS_SLOT` overrides adoption and is passed unchanged. Its
+owner is responsible for selecting the intended continuation. Default handles
+for new registrations include the scope hash so split panes do not collide on
+handle uniqueness; adoption keeps the old handle. Supplied handles/slugs retain
+their meaning on the normal join path. The existing process lock is keyed
+by a hash of the bus database and slot, avoiding punctuation and cross-fleet
+filename collisions. A confirmed dead owner can be reclaimed; invalid locks or
+permission-denied liveness checks fail closed. PID reuse and simultaneous stale-
+lock reclamation remain limitations of this process-lock scheme.
+
+Automatic delivery presents bounded batches, continuing until a pull returns no
+messages. Acknowledgments request another refill. A periodic pull recovers
+expired presentation leases even without a watcher event. Failed SDK delivery
+retains the current batch and retries it before acquiring more leases. Automatic
+delivery and manual pull/ack calls are serialized. Delivery is still at least
+once: SDK acceptance does not prove model handling, and an ambiguous request
+failure or lease expiry can repeat a message. Bus attempt limits and oversized
+message limits still apply; there is no automatic acknowledgment or revival.
+Injected text and manual pull output retain `[Agent Bus wake]` and explicitly
+identify peer content as not operator authorization; no extra SDK provenance
+fields are assumed.
+
+The plugin validates the join result and checks the existing identity with
+`heartbeat` before pull/ack or watcher restart. The adapter's explicit retired or
+unknown identity error stops the watcher and timers without rejoining. A changed
+bus database/transport also stops the instance instead of redirecting it.
+Transient adapter errors retry; retirement detection depends on the bundled
+adapter's heartbeat error contract, not a new status API. Root deletion and
+plugin disposal stop local delivery without performing an operator checkout.
+An already accepted prompt or in-flight subprocess cannot be recalled, and
+store/retirement checks are not atomic with a subsequent command. No hot reload
+or current-session restart is performed by editing the source; activate it only
+through an authorized install and a new OpenCode process.
+
+Behavioral tests evaluate the shipped TypeScript with stub SDK, subprocess,
+filesystem and timer dependencies. From this package, run:
+
+```bash
+node --experimental-vm-modules --test tests/opencode_agent_bus.test.mjs
+uv run --locked pytest tests/test_opencode_agent_bus_plugin.py -q
+```
+
+The pytest tests invoke the same Node suite and an isolated native integration
+using a private tmux server, empty tmux configuration, and synthetic local bus
+database. They pass real `members` output to the plugin and check identity,
+lease and inbox preservation through acknowledgment. The plugin's `tmux -u`
+query is also exercised under `LC_ALL=C` to verify tab-delimited parsing.
+Node 22.13+ and tmux are required; missing dependencies fail rather than skip.
+No JavaScript package dependency, live fleet, hook or model is used.
 
 ## Inspect and process the inbox
 

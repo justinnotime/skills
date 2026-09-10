@@ -793,4 +793,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Use the module whose globals config.activate() configures, not __main__.
+    from .facts import main
+
     raise SystemExit(main())

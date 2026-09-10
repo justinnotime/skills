@@ -14,6 +14,14 @@ Before changing backup behavior, read
 [the source-root contract](references/profiles.md). Support native-default-only and
 additional-root installations. Treat every configured label as an opaque
 destination suffix, never as an account identity or extraction permission.
+Full harness onboarding belongs to `agent-harness-integration`; backup does not
+install discovery links, hooks, accounts, or approve new source coverage.
+
+OpenCode database snapshots require sqlite3. A missing executable or failed
+snapshot/replacement preserves the previous snapshot, marks the profile failed,
+and produces a nonzero final exit after other harnesses run. Temporary snapshots
+are unique and atomically renamed; concurrent runs are last-successful-rename
+wins, not a guarantee that the freshest source snapshot wins.
 
 Schedulers call the script directly rather than invoking this Skill
 conversationally:

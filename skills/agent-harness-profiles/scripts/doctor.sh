@@ -39,7 +39,7 @@ if command -v realpath >/dev/null 2>&1; then
     error 'realpath must support the -m and -s options'
   fi
 fi
-command -v sqlite3 >/dev/null 2>&1 || warn 'sqlite3 is unavailable; OpenCode Backup uses its fallback copy path'
+command -v sqlite3 >/dev/null 2>&1 || warn 'sqlite3 is unavailable; discovered OpenCode databases will fail Backup without replacing previous snapshots'
 
 for script in "${SCRIPT_DIR}"/*.sh; do
   if bash -n "${script}"; then
@@ -59,7 +59,7 @@ if [[ -f "${config_file}" ]]; then
   fi
   if "${SCRIPT_DIR}/render-launchers.sh" --config "${config_file}" --check >/dev/null &&
     "${SCRIPT_DIR}/prepare-opencode-roots.sh" --config "${config_file}" --check >/dev/null; then
-    ok 'configured profile entries'
+    ok 'configured profile entries and launcher executables; source-time shell conflicts are checked on activation'
   else
     error 'configured profile entries'
   fi

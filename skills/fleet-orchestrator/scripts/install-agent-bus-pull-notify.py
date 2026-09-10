@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,8 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 import runtime_config as cfg  # noqa: E402
 # Codex honours CODEX_HOME; so must the installer, or agent-boot's wake-channel
 # check (which reads the same path) would refuse forever on such a host.
-CODEX = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+CODEX = Path(os.environ.get("TURN_HOOKS_CODEX_CONFIG") or
+             (Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"))
 UNIT_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd" / "user"
 UNIT = UNIT_DIR / "agent-bus-dispatcher.service"
 FLEET_UNIT = UNIT_DIR / "agent-bus-dispatcher@.service"
@@ -36,17 +38,27 @@ def hook_lines() -> list[str]:
 
 def replace_managed_hook(text: str) -> str:
     """Replace the marked hook only; keep unrelated notifications and hooks."""
+    desired = tomllib.loads("\n".join(hook_lines()))["hooks"]["Stop"][0]["hooks"][0]
+    existing = tomllib.loads(text).get("hooks", {}).get("Stop", [])
+    for group in existing:
+        for hook in group.get("hooks", []):
+            if (hook.get("type") == "command"
+                    and shlex.split(hook.get("command", "")) == shlex.split(desired["command"])):
+                # Codex can move comments when persisting trust. The parsed
+                # command still identifies an installed hook without its marker.
+                return text
     lines = text.splitlines()
     output: list[str] = []
     i = 0
     while i < len(lines):
         if lines[i].strip() == "[[hooks.Stop]]":
             end = i + 1
-            while end < len(lines) and not re.match(r"^\s*\[\[hooks\.[^.\]]+\]\]", lines[end]):
+            while end < len(lines) and (not lines[end].lstrip().startswith("[")
+                                        or lines[end].strip() == "[[hooks.Stop.hooks]]"):
                 end += 1
             block = lines[i:end]
             marker = next((n for n, line in enumerate(block) if line.strip() == HOOK_MARKER), None)
-            if marker is not None:
+            if marker is not None and sum(line.strip() == "[[hooks.Stop.hooks]]" for line in block) == 1:
                 # Old installs prepend this block; content following its marker
                 # may contain unrelated settings and must survive the upgrade.
                 output.extend(block[marker + 1:])
@@ -54,7 +66,9 @@ def replace_managed_hook(text: str) -> str:
                 continue
         output.append(lines[i])
         i += 1
-    return "\n".join(output).rstrip() + "\n\n" + "\n".join(hook_lines()) + "\n"
+    updated = "\n".join(output).rstrip() + "\n\n" + "\n".join(hook_lines()) + "\n"
+    tomllib.loads(updated)
+    return updated
 
 
 def render_unit(template: Path) -> str:
@@ -133,7 +147,9 @@ def main(argv: list[str] | None = None) -> None:
         unit_name = UNIT.name
         unit_path = UNIT
         unit_text = render_unit(template)
-    atomic_write(CODEX, replace_managed_hook(text))
+    updated = replace_managed_hook(text)
+    if updated != text:
+        atomic_write(CODEX, updated)
     if unit_name and unit_path and unit_text:
         UNIT_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write(unit_path, unit_text)
