@@ -1007,6 +1007,8 @@ def normalize_export_spacing(md: str) -> str:
         if not line.strip() and out and not out[-1].strip():
             continue
         out.append(line)
+    while fence is None and out and not out[-1].strip():
+        out.pop()
     return "".join(out)
 
 

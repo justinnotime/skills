@@ -120,7 +120,7 @@ def test_export_spacers_do_not_rewrite_existing_mirror(profile, monkeypatch):
 
 
 def test_new_export_removes_spacers_without_hiding_word_changes(profile, monkeypatch):
-    export(monkeypatch, "# Sample\n\n&nbsp;\n\nOriginal words.\n")
+    export(monkeypatch, "# Sample\n\n&nbsp;\n\nOriginal words.\n\n&nbsp;\n")
     assert run(profile) == 0
     readme = profile[2] / "archive/sample--syntheti/README.md"
     assert readme.read_text() == mirror.README_HEADER + "# Sample\n\nOriginal words.\n"
