@@ -980,7 +980,38 @@ def fuse_code_line_runs(md: str) -> str:
     return "\n".join(out)
 
 
+def normalize_export_spacing(md: str) -> str:
+    """Remove Google export spacer paragraphs, retaining literal entities in code."""
+    if "&nbsp;" not in md:
+        return md
+    out: list[str] = []
+    fence = None
+    for line in md.splitlines(keepends=True):
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if fence is not None:
+            out.append(line)
+            if (
+                marker
+                and marker[1][0] == fence[0]
+                and len(marker[1]) >= len(fence)
+                and not marker[2].strip()
+            ):
+                fence = None
+            continue
+        if marker:
+            fence = marker[1]
+            out.append(line)
+            continue
+        if re.fullmatch(r" {0,3}(?:&nbsp;[ \t]*)+\r?\n?", line):
+            line = "\n"
+        if not line.strip() and out and not out[-1].strip():
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def postprocess_native_md(md: str) -> str:
+    md = normalize_export_spacing(md)
     md = GOOGLE_URL_RE.sub(lambda m: unquote(m.group(1)), md)
     md = URL_TRACKER_RE.sub("", md)
     md = inline_image_refs(md)
@@ -1044,7 +1075,9 @@ def render_matches_previous(old_body: str | None, new_full: str) -> bool:
     """Compare canonical words to avoid changing images solely because exports re-encoded them."""
     if old_body is None:
         return False
-    return fingerprint(old_body) == fingerprint(new_full)
+    return fingerprint(normalize_export_spacing(old_body)) == fingerprint(
+        normalize_export_spacing(new_full)
+    )
 
 
 def previous_content(doc_dir: Path, manifest_path: Path) -> str | None:
