@@ -72,8 +72,20 @@ def test_extract_real_local_git_is_repeatable_and_writes_nothing(tmp_path):
         "### 2024-01-02 10:01:00Z -- assistant\n\nSynthetic response.\n"
     )
     subprocess.run(["git", "-C", str(root), "add", "."], check=True, env=env)
+    # Background Git maintenance must not race the read-only filesystem snapshot.
     subprocess.run(
-        ["git", "-C", str(root), "commit", "-qm", "sync: synthetic source"], check=True, env=env
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "maintenance.auto=false",
+            "commit",
+            "-qm",
+            "sync: synthetic source",
+        ],
+        check=True,
+        env=env,
     )
     cfg = tmp_path / "config.json"
     selected = synthetic_config(root)

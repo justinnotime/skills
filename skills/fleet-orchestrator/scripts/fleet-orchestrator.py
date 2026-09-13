@@ -3122,6 +3122,18 @@ def tick_checkout_hygiene(conn, dry: bool) -> None:
     for repo in WATCHED_CHECKOUTS:
         findings = checkout_findings(repo)
         if not findings:
+            if not dry:
+                # Drop obsolete delivery work, retaining the sampled evidence.
+                with conn:
+                    conn.execute(
+                        "UPDATE task_msg SET send_state='superseded-before-contact',"
+                        " processed='superseded-before-contact',"
+                        " last_error='checkout alert no longer matches inspection'"
+                        " WHERE task_id='hygiene' AND purpose='checkout-dirty'"
+                        " AND instr(dedup_key, ?)=1"
+                        " AND send_state IN ('recorded','failed')",
+                        (f"hygiene:{repo['path']}:",),
+                    )
             continue
         digest = hl.sha1("\n".join(sorted(findings)).encode()).hexdigest()[:12]
         day = wp.now() // 86400
