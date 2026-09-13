@@ -156,6 +156,13 @@ configured scheduler across fleets; `orc fleet NAME admin tick` runs only that
 fleet. Add `--dry-run` to inspect without executing checks or sending reminders.
 A status request never authorizes a real scheduler tick.
 
+The shared-checkout patrol normally delivers findings to the configured
+`commander` role. When that role has no holder, it records one operator-owned
+task per affected checkout instead of retrying an undeliverable message.
+The same patrol refreshes that task's evidence and closes it after a clean
+inspection. These tasks appear in the existing board and operator-wait view;
+they do not require a separate schedule or an agent registration.
+
 Existing flat commands (`open`, `tree`, `kanban`, `statusline`, etc.),
 `orc --fleet NAME COMMAND`, `orc tview`, and verb-before-name lifecycle forms
 continue to forward to the same handlers. They have no separate state or

@@ -277,7 +277,7 @@ def verify_lfs(root: Path, remote: str, revision: str, selected: list[str]) -> N
 
 def fetch(root: Path, remote: str, branch: str) -> str:
     git(root, "fetch", "--quiet", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
-    return f"refs/remotes/{remote}/{branch}"
+    return text(root, "rev-parse", "--verify", f"refs/remotes/{remote}/{branch}^{{commit}}")
 
 
 def prepare_worktree(root: Path, target: Path, task_branch: str, remote: str, branch: str):
@@ -366,6 +366,9 @@ def commit_worktree(root: Path, args) -> int:
         os.environ,
         REPOSITORY_PUBLISH_WORKTREE=str(root),
         REPOSITORY_PUBLISH_REPOSITORY=str(source),
+        REPOSITORY_PUBLISH_BASE_REF=text(
+            root, "merge-base", "HEAD", f"refs/remotes/{args.remote}/{args.branch}"
+        ),
     )
     checked_policy(validation, root, env)
     result = checked_policy(message, root, env, capture=True)
@@ -403,6 +406,7 @@ def run_at_ref(root: Path, reference: str, scratch: Path, argv: list[str]) -> in
                 os.environ,
                 REPOSITORY_PUBLISH_WORKTREE=str(target),
                 REPOSITORY_PUBLISH_REPOSITORY=str(root),
+                REPOSITORY_PUBLISH_BASE_REF=revision,
             )
             return subprocess.run(argv, cwd=target, env=env, check=False).returncode
         finally:
@@ -456,6 +460,8 @@ def worktree_main(argv: list[str]) -> int:
             raise Failure("remote and branch cannot be options")
         git(root, "check-ref-format", "refs/heads/" + args.branch)
         upstream = f"refs/remotes/{args.remote}/{args.branch}"
+        if args.action in {"ahead", "committed"}:
+            upstream = os.environ.get("REPOSITORY_PUBLISH_BASE_REF", upstream)
         if args.action in {"prepare", "reset", "commit"} and not args.task_branch:
             raise Failure("--task-branch is required")
         if args.task_branch and args.task_branch.startswith("-"):
@@ -525,10 +531,7 @@ def push_existing(
             if rebase.returncode:
                 git(root, "rebase", "--abort", check=False)
                 raise Failure("rebase conflict; progress was not advanced", 4)
-            try:
-                checked_policy(args.validate, root, env)
-            except Failure as exc:
-                raise Failure(str(exc), 3) from exc
+            env = dict(env, REPOSITORY_PUBLISH_BASE_REF=upstream)
             if message and text(root, "rev-list", "--count", upstream + "..HEAD") != "0":
                 result = checked_policy(message, root, env, capture=True)
                 if not result.strip():
@@ -542,6 +545,10 @@ def push_existing(
                 )
                 if proc.returncode:
                     raise Failure("commit message refresh failed")
+            try:
+                checked_policy(args.validate, root, env)
+            except Failure as exc:
+                raise Failure(str(exc), 3) from exc
             revision = text(root, "rev-parse", "HEAD")
             if selected:
                 committed = git(
@@ -852,6 +859,7 @@ def transaction(args) -> int:
                     "REPOSITORY_PUBLISH_REPOSITORY": str(args.repo),
                     "REPOSITORY_PUBLISH_SUBJECT": args.subject,
                     "REPOSITORY_PUBLISH_AGENT": args.agent,
+                    "REPOSITORY_PUBLISH_BASE_REF": initial,
                 }
             )
             log(f"txn/{args.task}: running writer")

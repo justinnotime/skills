@@ -17,6 +17,10 @@ The writer runs inside a linked worktree of the selected repository. Its
 environment contains `REPOSITORY_PUBLISH_WORKTREE`, `REPOSITORY_PUBLISH_STATE`,
 `REPOSITORY_PUBLISH_REPOSITORY`, `REPOSITORY_PUBLISH_SUBJECT` and
 `REPOSITORY_PUBLISH_AGENT`. `SYNC_STATE_DIR` also selects its staging directory.
+`REPOSITORY_PUBLISH_BASE_REF` is the immutable upstream commit used to prepare
+the worktree. Validators compare with that commit, not a remote-tracking ref
+that another process can change. The publisher updates it after each rebase;
+the `worktree ahead` and `committed` inspection commands honor it as well.
 Use `--worktree-env NAME` and `--state-env NAME` when adapting a writer that
 already uses different variable names. The original environment is inherited;
 these declared outputs override their values for the writer and policy commands.
@@ -65,7 +69,8 @@ are replaced inside each argument, without shell evaluation. A message command
 writes the complete commit message to stdout; empty output or any nonzero exit
 aborts publication. Keep its diagnostics on stderr. Validation must return zero
 and must not modify tracked content. It runs before committing and after every
-rebase. When rules change upstream, the message command runs again before push.
+rebase. When rules change upstream, the message command refreshes the commit
+before the final validation, so that validation can verify its policy metadata.
 Private commands own repository-specific policy, not the generic Git engine.
 
 ## Existing worktrees and LFS verification
@@ -130,7 +135,8 @@ scripts/publish worktree run-at-ref --repo /private/repository \
 ```
 
 The command runs with that checkout as its working directory and receives
-`REPOSITORY_PUBLISH_WORKTREE` and `REPOSITORY_PUBLISH_REPOSITORY`. Its stdout,
+`REPOSITORY_PUBLISH_WORKTREE`, `REPOSITORY_PUBLISH_REPOSITORY`, and
+`REPOSITORY_PUBLISH_BASE_REF` (the resolved inspected commit). Its stdout,
 stderr and exit status pass through. Temporary files and Git registration are
 removed on completion or command failure. This command does not commit or push;
 the explicitly selected external command remains responsible for its own effects.
