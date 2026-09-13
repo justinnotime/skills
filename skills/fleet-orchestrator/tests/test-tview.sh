@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tview isolation test: a PRIVATE -L server keeps fixtures away from live
-# terminals; sessions within it are separate fleets. Every assertion SAYS what failed, and the
+# terminals; fleets within it are started explicitly and a plain tmux session
+# stays invisible. Every assertion SAYS what failed, and the
 # environment is scrubbed - the pre-rework version died silently at `wait`
 # whenever it ran inside a tmux session, because script(1) inherited TMUX
 # and tview asked a private server for a client it never had.
@@ -34,7 +35,17 @@ cleanup() {
   if [[ ${TVIEW_TEST_KEEP_ARTIFACTS:-0} == 1 ]]; then
     echo "tview test artifacts: $stage" >&2
   else
-    rm -rf "$stage"
+    # Shells in the killed sessions exit asynchronously and may still write
+    # into the staged HOME; retry until the tree is gone.
+    local attempt
+    for attempt in $(seq 1 40); do
+      rm -rf "$stage" 2>/dev/null && break
+      sleep 0.25
+    done
+    if [[ -e "$stage" ]]; then
+      echo "FAIL: could not remove $stage" >&2
+      return 1
+    fi
   fi
 }
 trap 'cleanup || exit 1' EXIT
@@ -46,11 +57,15 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 mkdir -p "$stage/home" "$stage/fleets"
 cat >"$stage/config.json" <<EOF
 {
-  "schema": "fleet-runtime/v1",
-  "fleets": {"default_name": "primary"},
-  "tmux": {"primary_session": "0"}
+  "schema": "fleet-runtime/v1"
 }
 EOF
+# The runtime must not read the developer's own tmux configuration.
+cat >"$stage/tmux-bin" <<EOF
+#!/usr/bin/env bash
+exec "$(command -v tmux)" -f /dev/null "\$@"
+EOF
+chmod +x "$stage/tmux-bin"
 cat >"$stage/tview" <<EOF
 #!/usr/bin/env bash
 runtime="$TVIEW_RUNTIME"
@@ -63,19 +78,24 @@ exec env -u NW_TMUX_SERVER -u NW_FLEET_PROFILE_APPLIED \
   NW_DEFAULT_TMUX_SERVER="$server" NW_FLEET_PROFILE_DIR="$stage/fleets" \
   NW_FLEET_RUNTIME_ROOT="$stage/runtime" NW_FLEET_MATRIX_CFG_ROOT="$stage/matrix" \
   TVIEW_FLEET_PROFILE="$ROOT/scripts/lib/fleet-profile.py" \
-  TMUX_BIN="$(command -v tmux)" "\$runtime" "\$@"
+  TMUX_BIN="$stage/tmux-bin" "\$runtime" "\$@"
 EOF
 chmod +x "$stage/tview"
 cp "$stage/tview" "$stage/orc"
 TVIEW="$stage/tview"
 
-tmux -f /dev/null -L "$server" new-session -d -s 0 -n user-shell 'sleep 300' \
-  || fail "could not start the private server"
-tmux -L "$server" set-option -t 0 destroy-unattached off
-tmux -L "$server" new-window -d -t 0:1 -n one 'sleep 300'
-tmux -L "$server" new-window -d -t 0:2 -n two 'sleep 300'
-tmux -L "$server" new-session -d -s alternate -n alt-zero 'sleep 300'
+TMUX= NW_FLEET= "$stage/orc" fleet primary start >/dev/null \
+  || fail "could not start the primary fleet on the private server"
+tmux -L "$server" set-option -t primary destroy-unattached off
+tmux -L "$server" rename-window -t primary:0 user-shell
+tmux -L "$server" new-window -d -t primary:1 -n one 'sleep 300'
+tmux -L "$server" new-window -d -t primary:2 -n two 'sleep 300'
+TMUX= NW_FLEET= "$stage/orc" fleet alternate start >/dev/null \
+  || fail "could not start the alternate fleet"
+tmux -L "$server" rename-window -t alternate:0 alt-zero
 tmux -L "$server" new-window -d -t '=alternate:5' -n alt-five 'sleep 300'
+# A plain tmux session on the same server is a terminal, never a fleet.
+tmux -L "$server" new-session -d -s scratch -n plain 'sleep 300'
 
 cat >"$stage/fleets/$fleet_name.json" <<EOF
 {
@@ -111,6 +131,7 @@ tmux -f /dev/null -L "$missing_server" new-session -d -s unrelated -n shell 'sle
 catalog_before=$(for private_server in "$server" "$fleet_server" "$missing_server"; do
   tmux -L "$private_server" list-sessions -F '#{session_name}|#{session_id}'
 done)
+runtime_before=$(ls -A "$stage/runtime" | sort)
 TMUX= NW_FLEET= "$TVIEW" --list --json >"$stage/catalog.json"
 TMUX= NW_FLEET= "$TVIEW" --list >"$stage/catalog.txt"
 TMUX= NW_FLEET= "$stage/orc" tview -l -j >"$stage/short-catalog.json"
@@ -121,8 +142,10 @@ catalog_after=$(for private_server in "$server" "$fleet_server" "$missing_server
 done)
 [[ "$catalog_before" == "$catalog_after" ]] \
   || fail "listing fleets changed existing tmux sessions"
-[[ ! -S "$socket_dir/$offline_server" && ! -d "$stage/runtime" && ! -d "$stage/matrix" ]] \
-  || fail "listing fleets created a server or runtime state"
+[[ ! -S "$socket_dir/$offline_server" && ! -d "$stage/matrix" ]] \
+  || fail "listing fleets created a server or transport state"
+[[ "$(ls -A "$stage/runtime" | sort)" == "$runtime_before" ]] \
+  || fail "listing fleets changed saved work"
 python3 - "$stage/catalog.json" "$fleet_name" <<'PYCATALOG'
 import json
 import sys
@@ -130,12 +153,13 @@ import sys
 rows = json.load(open(sys.argv[1]))
 by_name = {row["name"]: row for row in rows}
 assert set(by_name) == {"primary", sys.argv[2], "offline", "missing", "alternate"}, rows
+assert "scratch" not in by_name, rows
 assert by_name["alternate"]["status"] == "online", rows
 assert by_name["primary"]["status"] == "online", rows
 assert by_name[sys.argv[2]]["status"] == "online", rows
 assert by_name["offline"]["status"] == "offline", rows
 assert by_name["missing"]["status"] == "missing-primary", rows
-assert by_name["primary"]["primary_session"] == "0", rows
+assert by_name["primary"]["primary_session"] == "primary", rows
 PYCATALOG
 for fleet in primary "$fleet_name" offline missing; do
   grep -q "$fleet" "$stage/catalog.txt" || fail "fleet $fleet missing from readable list"
@@ -152,6 +176,16 @@ done
   || fail "selecting a stopped fleet started its server"
 [[ $(tmux -L "$missing_server" list-sessions -F '#{session_name}') == unrelated ]] \
   || fail "selecting a missing primary created or changed sessions"
+if TMUX= NW_FLEET= "$TVIEW" -t scratch >"$stage/scratch.log" 2>&1; then
+  fail "a plain tmux session was entered as a fleet"
+fi
+grep -q "does not exist" "$stage/scratch.log" \
+  || fail "entering a plain session did not explain that it is not a fleet"
+if TMUX= NW_FLEET= "$TVIEW" >"$stage/unselected.log" 2>&1; then
+  fail "tview outside tmux entered a fleet nobody selected"
+fi
+grep -q "no fleet selected" "$stage/unselected.log" \
+  || fail "tview outside tmux did not ask for a selection"
 
 for private_server in "$server" "$fleet_server" "$missing_server"; do
   actual_socket=$(tmux -L "$private_server" display-message -p '#{socket_path}')
@@ -166,7 +200,7 @@ view_flow() {  # $1 = log name, $2 = window keys
   # off the pty, not ask the PRIVATE server about an outer client
   ( sleep 1; printf "$2"; sleep 1; printf '\002d' ) \
     | TERM=xterm-256color timeout 10 script -qec \
-      "TERM=xterm-256color TMUX= NW_FLEET= $TVIEW" /dev/null \
+      "TERM=xterm-256color TMUX= NW_FLEET=primary $TVIEW" /dev/null \
       >"$stage/$1.log" 2>&1
 }
 
@@ -177,59 +211,58 @@ wait "$b" || fail "view flow B exited nonzero: $(tail -3 "$stage/b.log" | tr '\n
 
 fmt='#{session_name}|#{session_group}|#{session_attached}|#{destroy_unattached}'
 sessions=$(tmux -L "$server" list-sessions -F "$fmt")
-grep -q '^0|' <<<"$sessions" || fail "primary session missing: $sessions"
+grep -q '^primary|' <<<"$sessions" || fail "primary session missing: $sessions"
 [[ $(grep -c '^tview-' <<<"$sessions") -eq 2 ]] \
   || fail "expected 2 tview views, got: $sessions"
 grep -q '|on$' <<<"$sessions" \
   && fail "destroy-unattached must never be on: $sessions"
-[[ $(tmux -L "$server" list-windows -t 0 | wc -l) -eq 3 ]] \
+[[ $(tmux -L "$server" list-windows -t primary | wc -l) -eq 3 ]] \
   || fail "primary window count changed"
-[[ $(tmux -L "$server" list-panes -a -F '#{pane_id}' | sort -u | wc -l) -eq 5 ]] \
+[[ $(tmux -L "$server" list-panes -a -F '#{pane_id}' | sort -u | wc -l) -eq 6 ]] \
   || fail "grouped views must share panes, not copy them"
 selected_windows=$(tmux -L "$server" list-sessions -F '#{session_name}|#{window_index}' \
   | awk -F'|' '$1 ~ /^tview-/ {print $2}' | sort | tr '\n' ' ')
 [[ "$selected_windows" == '1 2 ' ]] \
   || fail "simultaneous clients did not retain independent windows: $selected_windows"
-[[ $(tmux -L "$server" display-message -p -t '=0:' '#{window_index}') == 0 ]] \
+[[ $(tmux -L "$server" display-message -p -t '=primary:' '#{window_index}') == 0 ]] \
   || fail "viewer navigation changed the primary session's selected window"
 
-# The no-argument path above must still mean session 0. One positional
-# argument now always selects a window in that internal primary session,
-# first by index and then by exact name.
+# With NW_FLEET naming the fleet, one positional argument selects a window in
+# that fleet's primary session, first by index and then by exact name.
 ( sleep 1; printf '\002d' ) \
   | TERM=xterm-256color timeout 10 script -qec \
-    "TERM=xterm-256color TMUX= NW_FLEET=default $TVIEW 2" \
+    "TERM=xterm-256color TMUX= NW_FLEET=primary $TVIEW 2" \
     /dev/null >"$stage/positional-index.log" 2>&1 \
-  || fail "default-fleet positional window-index flow failed: $(tail -3 "$stage/positional-index.log" | tr '\n' ' ')"
+  || fail "positional window-index flow failed: $(tail -3 "$stage/positional-index.log" | tr '\n' ' ')"
 
 index_rows=$(tmux -L "$server" list-sessions \
   -F '#{session_name}|#{session_group}|#{window_index}')
-grep -Eq '^tview-[^|]+\|0\|2$' <<<"$index_rows" \
-  || fail "positional window index 2 was not selected in session 0: $index_rows"
+grep -Eq '^tview-[^|]+\|primary\|2$' <<<"$index_rows" \
+  || fail "positional window index 2 was not selected in session primary: $index_rows"
 
 ( sleep 1; printf '\002d' ) \
   | TERM=xterm-256color timeout 10 script -qec \
-    "TERM=xterm-256color TMUX= NW_FLEET= $TVIEW one" \
+    "TERM=xterm-256color TMUX= NW_FLEET=primary $TVIEW one" \
     /dev/null >"$stage/positional-name.log" 2>&1 \
   || fail "positional window-name flow failed: $(tail -3 "$stage/positional-name.log" | tr '\n' ' ')"
 
 group_rows=$(tmux -L "$server" list-sessions \
   -F '#{session_name}|#{session_group}|#{window_index}')
-grep -Eq '^tview-[^|]+\|0\|1$' <<<"$group_rows" \
+grep -Eq '^tview-[^|]+\|primary\|1$' <<<"$group_rows" \
   || fail "exact positional window name 'one' was not selected: $group_rows"
-awk -F'|' '$1 ~ /^tview-/ && $2 != "0" {exit 1}' <<<"$group_rows" \
+awk -F'|' '$1 ~ /^tview-/ && $2 != "primary" {exit 1}' <<<"$group_rows" \
   || fail "a positional window unexpectedly selected another session: $group_rows"
 
-# The configured default alias selects the same group even with a conflicting
-# inherited named fleet. No duplicate profile or server is needed.
+# An explicit fleet selects its group even with a conflicting inherited
+# named fleet. No duplicate profile or server is needed.
 ( sleep 1; printf '\002d' ) \
   | TERM=xterm-256color timeout 10 script -qec \
     "TERM=xterm-256color TMUX= NW_FLEET=$fleet_name $TVIEW --fleet primary 2" \
-    /dev/null >"$stage/default-alias.log" 2>&1 \
-  || fail "configured default alias failed: $(tail -3 "$stage/default-alias.log" | tr '\n' ' ')"
+    /dev/null >"$stage/explicit-fleet.log" 2>&1 \
+  || fail "explicit fleet selection failed: $(tail -3 "$stage/explicit-fleet.log" | tr '\n' ' ')"
 alias_rows=$(tmux -L "$server" list-sessions -F '#{session_name}|#{session_group}|#{window_index}')
-grep -Eq '^tview-[^|]+\|0\|2$' <<<"$alias_rows" \
-  || fail "configured default alias did not select the existing default group"
+grep -Eq '^tview-[^|]+\|primary\|2$' <<<"$alias_rows" \
+  || fail "explicit fleet selection did not select the primary group"
 
 # Merely having a named-fleet profile must not redirect the no-argument path.
 # The flows above used only the original private server; the fleet server is
@@ -243,7 +276,7 @@ fi
 mkfifo "$stage/observer-input"
 exec {observer_fd}<>"$stage/observer-input"
 TERM=xterm-256color timeout 60 script -qec \
-  "TMUX= $(command -v tmux) -L $server attach-session -t 0:0" /dev/null \
+  "TMUX= $(command -v tmux) -L $server attach-session -t primary:0" /dev/null \
   <"$stage/observer-input" >"$stage/observer.log" 2>&1 &
 observer_pid=$!
 observer_tty=
@@ -281,7 +314,7 @@ check_entry() {
   [[ $(tmux -L "$server" display-message -p -t "=$session:" '#{window_index}') == "$navigation_window" ]] \
     || fail "$label could not navigate its own view"
   [[ $(tmux -L "$server" list-clients -F '#{client_tty}|#{session_name}|#{window_index}' \
-    | awk -F'|' -v observer="$observer_tty" '$1 == observer {print $2 "|" $3}') == '0|0' ]] \
+    | awk -F'|' -v observer="$observer_tty" '$1 == observer {print $2 "|" $3}') == 'primary|0' ]] \
     || fail "$label moved or detached the observer client"
   tmux -L "$server" detach-client -t "$tty"
   wait "$pid" || fail "$label exited nonzero (see $stage/$label.log)"
@@ -291,9 +324,9 @@ check_entry target-index alternate 5 "$TVIEW" -t alternate:5
 check_entry target-name alternate 5 "$TVIEW" --target alternate:alt-five
 check_entry short-flags alternate 5 "$TVIEW" -f alternate -w 5
 check_entry long-flags alternate 5 "$TVIEW" --fleet alternate --window alt-five
-check_entry current-window 0 2 "$TVIEW" -t :2
-check_entry numeric-session 0 2 "$TVIEW" -t 0:2
-check_entry default-alias 0 2 "$TVIEW" -t primary:two
+check_entry current-window primary 2 env NW_FLEET=primary "$TVIEW" -t :2
+check_entry named-session primary 2 "$TVIEW" -t primary:2
+check_entry named-window primary 2 "$TVIEW" -t primary:two
 check_entry orc-target alternate 5 "$stage/orc" tview -t alternate:5
 check_entry orc-fleet alternate 5 "$stage/orc" --fleet alternate tview -w 5
 check_entry orc-workgroup alternate 5 "$stage/orc" fleet alternate view 5
@@ -307,17 +340,17 @@ check_entry orc-long alternate 5 "$stage/orc" tview --fleet alternate --window 5
 # switch-client would move the observer instead. check_entry asserts both.
 live_socket=$(tmux -L "$server" display-message -p '#{socket_path}')
 live_pid=$(tmux -L "$server" display-message -p '#{pid}')
-live_pane=$(tmux -L "$server" list-panes -t '=0:0' -F '#{pane_id}' | head -n 1)
+live_pane=$(tmux -L "$server" list-panes -t '=primary:0' -F '#{pane_id}' | head -n 1)
 [[ -n "$live_socket" && "$live_pid" =~ ^[0-9]+$ && "$live_pane" == %* ]] \
   || fail "could not read the private server's identity: $live_socket $live_pid $live_pane"
-entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET="
-check_entry stale-server-and-pane 0 2 "$TVIEW" 2
-entry_env="TMUX=$live_socket,$live_pid,0 TMUX_PANE=%999 NW_FLEET="
-check_entry stale-pane-on-live-server 0 1 "$TVIEW" -t :1
+entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET=primary"
+check_entry stale-server-and-pane primary 2 "$TVIEW" 2
+entry_env="TMUX=$live_socket,$live_pid,0 TMUX_PANE=%999 NW_FLEET=primary"
+check_entry stale-pane-on-live-server primary 1 "$TVIEW" -t :1
 entry_env="TMUX=$live_socket,999999,0 TMUX_PANE=$live_pane NW_FLEET="
 check_entry stale-server-reused-pane-number alternate 5 "$stage/orc" tview -t alternate:5
 entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET="
-check_entry stale-pair-explicit-default 0 1 "$stage/orc" tview -t default:1
+check_entry stale-pair-explicit-fleet primary 1 "$stage/orc" tview -t primary:1
 entry_env='TMUX= NW_FLEET='
 tmux -L "$server" detach-client -t "$observer_tty"
 wait "$observer_pid" || fail "observer exited nonzero"
@@ -336,16 +369,16 @@ reject_entry -t ''
 reject_entry -t :
 reject_entry -t alternate:5 -w 2
 reject_entry -w 2 -t alternate:5
-reject_entry -f default -t alternate
-reject_entry -t alternate -t default
+reject_entry -f primary -t alternate
+reject_entry -t alternate -t primary
 reject_entry -l -t alternate
 reject_entry -j
 
-# An explicit default selector can switch from an unrelated session group.
-# It selects the requested window in session 0's grouped view.
+# An explicit fleet selector can switch from an unrelated session group.
+# It selects the requested window in the primary fleet's grouped view.
 cat >"$stage/same-server-command" <<EOF
 #!/usr/bin/env bash
-exec env TERM=xterm-256color NW_FLEET= "$stage/orc" tview -t default:1
+exec env TERM=xterm-256color NW_FLEET= "$stage/orc" tview -t primary:1
 EOF
 chmod +x "$stage/same-server-command"
 cat >"$stage/unknown-command" <<EOF
@@ -393,16 +426,16 @@ for _ in {1..50}; do
   same_target_row=$(tmux -L "$server" list-clients \
     -F '#{client_tty}|#{session_name}|#{session_group}|#{window_index}' \
     2>/dev/null | head -n 1 || true)
-  [[ "$same_target_row" == *'|0|1' ]] && break
+  [[ "$same_target_row" == *'|primary|1' ]] && break
   sleep 0.1
 done
 IFS='|' read -r same_target_tty same_target_session same_target_group \
   same_target_window <<<"$same_target_row"
 [[ "$same_target_tty" == "$same_client_tty" \
    && "$same_target_session" == tview-* \
-   && "$same_target_group" == 0 \
+   && "$same_target_group" == primary \
    && "$same_target_window" == 1 ]] \
-  || fail "explicit default did not preserve window 1 across session groups: $same_target_row"
+  || fail "explicit fleet did not preserve window 1 across session groups: $same_target_row"
 tmux -L "$server" detach-client -t "$same_target_tty"
 wait "$same_pid" \
   || fail "same-server client flow exited nonzero: $(tail -3 "$stage/same-server.log" | tr '\n' ' ')"
@@ -456,15 +489,15 @@ printf '%s\n' "\$?" >"$stage/stale-named.status"
 EOF
 cat >"$stage/return-command" <<EOF
 #!/usr/bin/env bash
-exec "$TVIEW" --fleet default --window 9
+exec "$TVIEW" --fleet primary --window 9
 EOF
 chmod +x "$stage/stale-default-command" "$stage/stale-named-command" "$stage/return-command"
 # The destination pane needs a shell to exercise a second call from its
-# grouped view and then return to the default fleet on the same terminal.
+# grouped view and then return to the primary fleet on the same terminal.
 tmux -L "$fleet_server" respawn-window -k -t '=main:7' \
   'exec bash --noprofile --norc -i'
 
-tmux -L "$server" new-window -d -t '0:9' -n handoff-shell \
+tmux -L "$server" new-window -d -t 'primary:9' -n handoff-shell \
   'exec bash --noprofile --norc -i'
 a_sessions_before=$(tmux -L "$server" list-sessions -F '#{session_name}' | sort)
 b_sessions_before=$(tmux -L "$fleet_server" list-sessions -F '#{session_name}' | sort)
@@ -473,7 +506,7 @@ handoff_input="$stage/handoff-input"
 mkfifo "$handoff_input"
 exec {handoff_input_fd}<>"$handoff_input"
 TERM=xterm-256color timeout 15 script -qec \
-  "TERM=xterm-256color TMUX= $(command -v tmux) -L $server attach-session -t '0:9'" \
+  "TERM=xterm-256color TMUX= $(command -v tmux) -L $server attach-session -t 'primary:9'" \
   /dev/null <"$handoff_input" >"$stage/handoff.log" 2>&1 &
 handoff_pid=$!
 
@@ -489,21 +522,21 @@ done
 
 # A real tmux client is authoritative even when its shell inherited another
 # fleet name. Exercise primary-session discovery before the cross-server call.
-tmux -L "$server" send-keys -t '0:9' "$stage/stale-default-command" Enter
+tmux -L "$server" send-keys -t 'primary:9' "$stage/stale-default-command" Enter
 for _ in {1..50}; do
   [[ -f "$stage/stale-default.status" ]] && break
   sleep 0.1
 done
 [[ -f "$stage/stale-default.status" && $(cat "$stage/stale-default.status") == 0 ]] \
-  || fail "automatic default-fleet association did not finish successfully"
+  || fail "automatic fleet association did not finish successfully"
 default_client_row=$(tmux -L "$server" list-clients \
   -F '#{client_tty}|#{session_name}|#{session_group}|#{window_index}')
 IFS='|' read -r default_tty default_view default_group default_window <<<"$default_client_row"
 [[ "$default_tty" == "$a_client_tty" && "$default_view" == tview-* \
-   && "$default_group" == 0 && "$default_window" == 9 ]] \
-  || fail "stale NW_FLEET redirected a real default-fleet client: $default_client_row"
+   && "$default_group" == primary && "$default_window" == 9 ]] \
+  || fail "stale NW_FLEET redirected a real fleet client: $default_client_row"
 
-tmux -L "$server" send-keys -t '0:9' "$stage/handoff-command" Enter
+tmux -L "$server" send-keys -t 'primary:9' "$stage/handoff-command" Enter
 
 b_client_row=
 for _ in {1..50}; do
@@ -522,7 +555,7 @@ IFS='|' read -r b_client_tty b_client_session b_client_window <<<"$b_client_row"
   || fail "server B client is not in the requested tview window: $b_client_row"
 
 # The association must also recognize a grouped tview session, not only the
-# primary session, and ignore an inherited default label in that named fleet.
+# primary session, and ignore an inherited stale label in that named fleet.
 tmux -L "$fleet_server" send-keys -t '=main:7' "$stage/stale-named-command" Enter
 for _ in {1..50}; do
   [[ -f "$stage/stale-named.status" ]] && break
@@ -543,15 +576,15 @@ for _ in {1..50}; do
   return_row=$(tmux -L "$server" list-clients \
     -F '#{client_tty}|#{session_name}|#{session_group}|#{window_index}' 2>/dev/null \
     | head -n 1 || true)
-  [[ "$return_row" == *'|0|9' ]] && break
+  [[ "$return_row" == *'|primary|9' ]] && break
   sleep 0.1
 done
 IFS='|' read -r return_tty return_view return_group return_window <<<"$return_row"
 [[ "$return_tty" == "$a_client_tty" && "$return_view" == tview-* \
-   && "$return_group" == 0 && "$return_window" == 9 ]] \
-  || fail "explicit default did not return on the same terminal: $return_row"
+   && "$return_group" == primary && "$return_window" == 9 ]] \
+  || fail "explicit fleet did not return on the same terminal: $return_row"
 [[ -z $(tmux -L "$fleet_server" list-clients -F '#{client_tty}') ]] \
-  || fail "return to default left an attached named-fleet client"
+  || fail "return to the primary fleet left an attached named-fleet client"
 tmux -L "$server" detach-client -t "$return_tty"
 wait "$handoff_pid" \
   || fail "cross-server client flow exited nonzero: $(tail -3 "$stage/handoff.log" | tr '\n' ' ')"
@@ -565,16 +598,16 @@ missing_b=$(comm -23 <(printf '%s\n' "$b_sessions_before") \
   <(printf '%s\n' "$b_sessions_after"))
 [[ -z "$missing_a" && -z "$missing_b" ]] \
   || fail "cross-server handoff deleted sessions: A=[$missing_a] B=[$missing_b]"
-tmux -L "$server" has-session -t '=0' \
+tmux -L "$server" has-session -t '=primary' \
   || fail "server A primary session disappeared during handoff"
 tmux -L "$fleet_server" has-session -t '=main' \
   || fail "server B primary session disappeared during handoff"
 
-if TERM=xterm-256color TMUX= NW_FLEET= "$TVIEW" 99 \
+if TERM=xterm-256color TMUX= NW_FLEET=primary "$TVIEW" 99 \
     >"$stage/missing-window.log" 2>&1; then
   fail "missing window was accepted"
 fi
-grep -q "window '99' not found in session '0'" "$stage/missing-window.log" \
+grep -q "window '99' not found in session 'primary'" "$stage/missing-window.log" \
   || fail "missing-window error was not explicit"
 
 if TERM=xterm-256color TMUX= NW_FLEET= \
@@ -595,8 +628,9 @@ grep -q -- "--session was removed; choose a fleet and window only" \
 
 # ---- reap prong on the REAL private server ----
 # A different fleet survives solely in a grouped view after its original
-# primary closes. Entering default must not terminate those windows/processes.
-tmux -L "$server" new-session -d -s orphan-parent 'sleep 300'
+# primary closes. Entering another fleet must not terminate those windows/processes.
+TMUX= NW_FLEET= "$stage/orc" fleet orphan-parent start >/dev/null \
+  || fail "could not start the orphan fleet"
 tmux -L "$server" new-session -d -t orphan-parent -s tview-unrelated-orphan
 tmux -L "$server" kill-session -t '=orphan-parent'
 orphan_panes=$(tmux -L "$server" list-panes -s -t '=tview-unrelated-orphan' \
@@ -614,14 +648,14 @@ sleep 2
 TVIEW_REAP_IDLE_S=1 view_flow d '\0020' \
   || fail "reap flow exited nonzero: $(tail -3 "$stage/d.log" | tr '\n' ' ')"
 after=$(tmux -L "$server" list-sessions -F "$fmt")
-grep -q '^0|' <<<"$after" || fail "the PRIMARY session was reaped: $after"
-live_views=$(awk -F'|' '$1 ~ /^tview-/ && $2 == "0" {n++} END {print n+0}' <<<"$after")
+grep -q '^primary|' <<<"$after" || fail "the PRIMARY session was reaped: $after"
+live_views=$(awk -F'|' '$1 ~ /^tview-/ && $2 == "primary" {n++} END {print n+0}' <<<"$after")
 # the reap pass ran before flow-d created/attached its own view: the two
 # idle detached views from earlier must be gone, flow-d's own view remains
 [[ "$live_views" -le 1 ]] \
   || fail "detached idle views survived the reap: $after"
 tmux -L "$server" has-session -t '=tview-unrelated-orphan' \
-  || fail "entering default reaped another fleet's only surviving view"
+  || fail "entering the primary fleet reaped another fleet's only surviving view"
 [[ $(tmux -L "$server" list-panes -s -t '=tview-unrelated-orphan' \
   -F '#{pane_id}|#{pane_pid}') == "$orphan_panes" ]] \
   || fail "reaping another group changed the orphan fleet's processes"

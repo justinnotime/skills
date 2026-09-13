@@ -74,7 +74,7 @@ WORKFLOWS = {
              f"Joining procedure: {HERE.parent / 'references/agent-bus.md'} "
              "(Join the current session).",
     "admin": "The configured scheduler owns real ticks. Use tick --dry-run for inspection.\n"
-             "Unselected 'orc admin tick' covers configured fleets; a named fleet limits it.",
+             "Unselected 'orc admin tick' covers every live fleet; a named fleet limits it.",
 }
 LEGACY_COMMANDS = {}
 for _group, _commands in GROUPS.items():
@@ -86,9 +86,9 @@ LEGACY_COMMANDS.update({
     "statusline": "board --view summary",
     "kanban": "board --view columns",
 })
-LEGACY_LIFECYCLE = {"create": "create", "start": "create", "stop": "stop",
-                    "window": "window", "rename": "rename", "show": "resolve",
-                    "apply-tmux": "apply-tmux"}
+LEGACY_LIFECYCLE = {"create": "start", "start": "start", "stop": "stop",
+                    "window": "window", "rename": "rename", "retire": "retire",
+                    "show": "resolve", "apply-tmux": "apply-tmux"}
 
 
 def run_script(name, args, *, env=None):
@@ -124,7 +124,8 @@ Fleet terminals:
   start                    Create or resume this fleet
   window                   Add a terminal window
   rename NEW               Rename this fleet while preserving saved work
-  stop                     Stop its terminals and retain saved work""", file=file)
+  stop                     Pause: stop its terminals and retain saved work
+  retire                   End: stop it, retire its seats, archive its saved work""", file=file)
     for group, commands in GROUPS.items():
         print(f"\n{group.title()} commands:", file=file)
         for command, description in commands.items():
@@ -137,8 +138,9 @@ A receipt records evidence; merging requires its own authority.
 Use '{prefix} GROUP --help' for relationships and '{prefix} GROUP COMMAND --help' for arguments.
 Use '{prefix} help legacy' to map old flat commands to these groups.
 A leading --config FILE selects private runtime settings.
-Without an explicit selector, a command follows its actual tmux fleet.
-Unselected 'orc admin tick' runs the configured fleet scheduler; add a fleet to limit it.""", file=file)
+Without an explicit selector, a command follows the fleet of its actual tmux session.
+A plain tmux session is not a fleet; 'orc fleet NAME start' makes one.
+Unselected 'orc admin tick' schedules every live fleet; add a fleet to limit it.""", file=file)
 
 
 def legacy_help(prefix):
@@ -264,10 +266,10 @@ def main():
         if not args:
             args = ["overview"]
         prefix = f"orc fleet {selected}" if selected else "orc"
-        if args[0] in {"start", "stop", "window", "rename"}:
+        if args[0] in {"start", "stop", "window", "rename", "retire"}:
             action = args.pop(0)
             name = selected or profile.command_selection()
-            run_script("lib/fleet-profile.py", ["create" if action == "start" else action, name, *args])
+            run_script("lib/fleet-profile.py", [action, name, *args])
         if args[0] in {"goals", "agents"}:
             args = ["goal" if args[0] == "goals" else "agent", "list", *args[1:]]
         if args[0] in GROUPS:
@@ -303,6 +305,9 @@ def main():
             root_help(prefix, file=sys.stderr)
             return 2
         os.environ["ORC_CLI_PROG"] = prefix
+        if "--help" in args or "-h" in args:
+            # Argument help describes the command; it needs no fleet and touches no store.
+            run_script("fleet-orchestrator.py", args)
         flags = ["--fleet", selected] if selected is not None else []
         run_script("lib/fleet-profile.py", ["exec-current", *flags, "--", sys.executable,
                                               str(HERE / "fleet-orchestrator.py"), *args])

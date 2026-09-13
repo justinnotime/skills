@@ -36,8 +36,10 @@ task name without a host prefix or terminal suffix. For a named fleet, retain
 `--fleet <name>` on its commands. Inspect the returned identity, harness, mode
 and pane before reusing a registration.
 
-In ordinary local tmux sessions, boot and bus commands discover the session's
-fleet automatically. An explicit `--fleet` still selects exactly that fleet.
+Inside a fleet's tmux session, boot and bus commands select that fleet
+automatically. A plain tmux session is not a fleet: onboarding there fails and
+names the `orc fleet NAME start` or `--fleet NAME` step. An explicit `--fleet`
+still selects exactly that fleet.
 Use different task names for simultaneous agents; a window belongs to its
 session but does not become a registered message recipient until onboarding.
 

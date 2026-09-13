@@ -27,9 +27,9 @@ Keep the package at its installed location, or rerun installation after moving i
 
 `orc` lists fleets with terminal availability and current work. `orc fleet NAME`
 opens that fleet's work overview; `tview -t NAME` enters its terminal windows.
-Both use the same names, default alias, session groups and saved history.
-Grouped terminal viewers never become additional fleets. Stopped local fleets
-with saved tasks or messages remain discoverable without starting a terminal.
+Both use the same names, session groups and saved history. Grouped terminal
+viewers never become additional fleets. A stopped fleet stays listed as
+`stopped` until it is retired; a retired fleet leaves every listing.
 
 ```bash
 orc
@@ -156,27 +156,23 @@ configured scheduler across fleets; `orc fleet NAME admin tick` runs only that
 fleet. Add `--dry-run` to inspect without executing checks or sending reminders.
 A status request never authorizes a real scheduler tick.
 
-The shared-checkout patrol normally delivers findings to the configured
-`commander` role. When that role has no holder, it records one operator-owned
-task per affected checkout instead of retrying an undeliverable message.
-The same patrol refreshes that task's evidence and closes it after a clean
-inspection. These tasks appear in the existing board and operator-wait view;
-they do not require a separate schedule or an agent registration. A missing
-checkout or failed Git inspection is reported and cannot close an existing task.
-
 Existing flat commands (`open`, `tree`, `kanban`, `statusline`, etc.),
 `orc --fleet NAME COMMAND`, `orc tview`, and verb-before-name lifecycle forms
 continue to forward to the same handlers. They have no separate state or
 implementation. `tree` now defaults to current goals too; use `tree --all` for
 its historical output. Use `board --view columns|summary` in new integrations.
 
-Ordinary local fleets are native tmux session groups: the session name selects the
-task and message stores. There is no separate local fleet configuration to
-create, synchronize or delete. A session made with native tmux commands is
-discovered too. Existing explicit local/Matrix profiles remain supported for
-compatibility and configured network transports.
+A fleet is a tmux session group that `orc fleet NAME start` bound to saved
+work: the session name selects the task and message stores, and the saved
+directory under the fleet runtime root is the fleet's durable identity. There
+is no separate local fleet configuration to create, synchronize or delete, and
+there is no default fleet. A session made with native tmux commands is a plain
+terminal: it is not listed, scheduled, entered or joined until `start` binds
+it. A hand-made session whose name matches saved work is that fleet's session.
+Existing explicit local/Matrix profiles remain supported for compatibility and
+configured network transports.
 
-You do not need to create a tmux session first. Start or reuse a workgroup and
+You do not need to create a tmux session first. Start or resume a fleet and
 enter its windows with:
 
 ```bash
@@ -195,21 +191,36 @@ These are independent operations, not a sequence to run together:
 
 | Operation | Command | Effect on tmux |
 |---|---|---|
-| Start or resume a workgroup | `orc fleet NAME start` | Create or reuse its named session |
+| Start or resume a fleet | `orc fleet NAME start` | Create or reuse its named session and bind it to saved work |
 | Enter its terminals | `tview --fleet NAME` | View the same shared windows |
 | Add a terminal | `orc fleet NAME window` | Create a window in the selected session |
-| Rename a workgroup | `orc fleet OLD rename NEW` | Rename the session and retain its history association |
-| End a workgroup | `orc fleet NAME stop` | Terminate all its shared windows and the processes in them; retain saved work |
+| Rename a fleet | `orc fleet OLD rename NEW` | Rename the session and retain its history association |
+| Pause a fleet | `orc fleet NAME stop` | Terminate all its shared windows and the processes in them; retain saved work |
+| End a fleet | `orc fleet NAME retire` | Stop it if running, retire remaining seats, move saved work to the archive directory |
 
 The legacy `orc fleet create NAME` remains an alias for `start`. Stop closes the session's shared windows
 so grouped viewer sessions cannot keep its agents running. It retires the
 stopped panes' registered identities and retains task/message history. Follow
 any caller-owned checkout/handoff requirements before stopping. Reopening the
-same session name reuses its saved work. Ending a session does not delete its
-history or leave a local configuration file to remove. An ordinary new window
-inherits its workgroup through its session; no environment export or agent
-restart is needed for command selection. Agent registration and model startup
-still use the normal onboarding procedure.
+same session name reuses its saved work. Stopping does not delete history or
+leave a local configuration file to remove; the fleet stays listed as
+`stopped`. Retire is the end of the lifecycle: the saved directory moves to
+`<runtime_directory>-archive/NAME-YYYYMMDD`, any rename aliases are removed,
+open tasks are reported and archived as history rather than closed, and the
+name is free for a new fleet. Retire refuses to run from inside the fleet's own
+session, because stopping the windows would end the command before the archive
+step. Explicit profiles are retired by removing the profile file and their
+configured storage.
+
+Starting a fleet whose tmux server died, such as after a reboot or an account
+migration, recreates the session and retires every registered seat whose server
+generation or pane no longer exists, then lists those seats by window, harness
+and handle. ORC records seat obligations, not model memory: reopen each listed
+seat in its own window, resume the harness conversation with the harness's own
+resume command, and run the normal onboarding so the same slot registers again
+and reads its owed tasks, roles and predecessor handoff. An ordinary new window
+inherits its fleet through its session; no environment export or agent restart
+is needed for command selection.
 
 Each used local session stores one immutable `@orc-runtime` history key on
 tmux itself. `orc fleet OLD rename NEW` records the new name as a relative
@@ -242,14 +253,17 @@ board does not create or migrate the bus database. A window's existence does
 not register a model, transfer its tasks, or prove that it responds to messages.
 
 Configure one machine schedule to call `orc admin tick`. It discovers the
-default and live local fleets with existing task databases, runs them with
-bounded concurrency, and uses each task store's existing lock. A slow or failed
-fleet does not prevent another from starting. Newly created shell-only sessions
-need no database or scheduling job. Local fleets process their own recorded work
-and do not run the default fleet's global repository patrol. No fleet imports
-open PRs as new tasks: register each PR explicitly in its owning fleet with
-`task open` or `task dispatch`, using `--workflow pr`. GitHub account membership
-and merge responsibility do not establish task ownership.
+live fleets with existing task databases, runs them with bounded concurrency,
+and uses each task store's existing lock. A slow or failed fleet does not
+prevent another from starting. Newly started fleets without tasks and plain
+tmux sessions need no database or scheduling job. Each fleet processes only its
+own recorded work. After the fleets, the same tick runs the machine-level
+checkout patrol over `watched_repositories`: it logs a `WARN` line per unclean
+checkout and writes `state/fleet-orchestrator/checkout-patrol.json` under the
+machine runtime directory; it never records fleet tasks or messages. No fleet
+imports open PRs as new tasks: register each PR explicitly in its owning fleet
+with `task open` or `task dispatch`, using `--workflow pr`. GitHub account
+membership and merge responsibility do not establish task ownership.
 Explicit `orc fleet NAME admin tick` remains a single-fleet
 command. `orc admin tick --dry-run` inspects without scheduling writes or sends.
 Explicit legacy/network profiles keep their separately configured schedules.
@@ -259,7 +273,7 @@ Explicit legacy/network profiles keep their separately configured schedules.
 ```bash
 tview -l
 tview -l -j
-tview -t default
+tview -t example
 tview -t example:3
 tview -t example:editor
 tview 3
@@ -269,8 +283,8 @@ orc tview -t example:3
 `tview` is the short entry; `orc tview` forwards the same arguments. Like
 `tmux attach -t SESSION:WINDOW` (or `tmux a -t SESSION:WINDOW`), `-t` selects a
 session and optionally a window index or exact window name. `-t SESSION` enters
-that session's view; `-t :WINDOW` selects a window in the current/default fleet.
-The session selector also accepts a configured fleet alias. Both short and
+that session's view; `-t :WINDOW` selects a window in the current fleet.
+The session selector is the fleet name. Both short and
 long forms are supported: `-f`/`--fleet NAME`, `-w`/`--window WINDOW`, `-l`/`--list`,
 `-j`/`--json`, `-h`/`--help`; the long form of `-t` is `--target`.
 For example, `tview -f example -w 3` and
@@ -286,35 +300,28 @@ processes remain shared. This is an interactive terminal, not tmux read-only
 mode. The `-t` spelling follows tmux; tview is not a pass-through for every
 tmux flag or target expression.
 
-The list derives ordinary local fleets from live tmux session groups and also
-includes the default configuration and existing explicit profiles. It distinguishes
-an online primary, an offline server, a missing primary session, and invalid or
-unavailable configuration. It never starts a server or creates a session.
-Availability here means tmux availability, not agent responsiveness or task
-completion. Grouped terminal views are not additional fleets.
-
-Set `fleets.default_name` in the private runtime configuration to give the
-existing default fleet a recognizable alias. Both that alias and `default`
-select the same fleet in `tview`, `orc` and `agent-bus`; no database or message
-transport is moved. `tmux.primary_session` selects its primary session, with
-`0` as the compatible default. This preserves an existing deployment's default
-data and transport while new local sessions receive their own stores.
+The list derives fleets from live bound tmux session groups, saved work
+without a terminal, and existing explicit profiles. It distinguishes an online
+primary, a stopped fleet, and for explicit profiles an offline server, a
+missing primary session, and invalid or unavailable configuration. It never
+starts a server or creates a session. Availability here means tmux
+availability, not agent responsiveness or task completion. Grouped terminal
+views and plain tmux sessions are not fleets.
 
 An explicit `--fleet` always selects that target. For ORC and Agent Bus it stays
 in effect through that command's child processes, including an explicit default
 selection. A process-scoped marker prevents an old exported selector from
 redirecting a later unrelated command. Inside tmux, an unselected
 `tview` identifies the fleet from the actual socket and exact primary session
-or its session group, ignoring a stale `NW_FLEET`. Local sessions on the configured
+or its session group, ignoring a stale `NW_FLEET`. Fleet sessions on the configured
 server map directly to their names. Inherited `TMUX` and `TMUX_PANE` are trusted
 only while the server that minted `TMUX` still owns that pane, verified by server
 process ID and pane ID; a stale pair, such as one passed down by a daemon that
 was started in a pane and outlived its server, is ignored, because tmux would
 otherwise answer "current" queries with an arbitrary attached client. Outside
-tmux, `NW_FLEET` selects a configured fleet when present; otherwise `tview`
-enters the default fleet. A positional
-argument remains a window index or exact window name, so `tview 3` keeps its
-meaning. Use `tview --fleet default` to return from a named fleet.
+tmux, `NW_FLEET` selects a fleet when present; otherwise `tview` refuses and
+prints the fleet list. A positional argument remains a window index or exact
+window name, so `tview 3` keeps its meaning inside a fleet.
 
 Each attached terminal keeps its own grouped view and selected window. Switching
 between servers replaces that terminal's client without destroying either
@@ -350,7 +357,7 @@ explicit configuration they use the normal XDG configuration location. A direct
 hook does not need a launcher-specific environment prefix when that default
 location already selects the intended private configuration. Keep a prefix or
 `--config` when using a nondefault configuration. Selection or reporting failure
-does not block the harness, and does not retry against the default fleet.
+does not block the harness, and does not retry against another fleet.
 
 ### Codex hooks
 

@@ -1,4 +1,4 @@
-"""Exercise session lifecycle and bus separation on a private real tmux server."""
+"""Exercise the explicit fleet lifecycle and bus separation on a private real tmux server."""
 
 import json
 import os
@@ -29,13 +29,8 @@ class SessionFleetTest(unittest.TestCase):
         self.config = self.root / "config.json"
         self.config.write_text(json.dumps({
             "schema": "fleet-runtime/v1",
-            "runtime_dir": str(self.root / "default"),
-            "paths": {"ledger": str(self.root / "default/tasks.sqlite3")},
-            "bus": {
-                "transport": "local",
-                "config_directory": str(self.root / "default/bus"),
-                "database": str(self.root / "default/bus/inbox.sqlite3"),
-            },
+            "runtime_dir": str(self.root / "machine"),
+            "bus": {"transport": "local"},
             "fleets": {
                 "profile_directory": str(self.root / "profiles"),
                 "runtime_directory": str(self.root / "fleets"),
@@ -64,7 +59,11 @@ class SessionFleetTest(unittest.TestCase):
         return self.run_command(["tmux", "-u", "-L", self.server, *args], **kwargs)
 
     def native_session(self, name):
+        """A plain tmux session: a terminal, never a fleet."""
         self.tmux("new-session", "-d", "-s", name, "sleep 300")
+
+    def start(self, name):
+        return self.run_command([ORC, "fleet", name, "start"])
 
     def view(self, name):
         return json.loads(self.run_command([ORC, "fleet", "show", name]).stdout)
@@ -72,17 +71,29 @@ class SessionFleetTest(unittest.TestCase):
     def bus(self, name, *args, **kwargs):
         return self.run_command([BUS, "--fleet", name, *args], **kwargs)
 
-    def join(self, name, handle):
-        pane = self.tmux("display-message", "-p", "-t", f"={name}:0.0", "#{pane_id}").stdout.strip()
+    def inventory(self):
+        return [row["name"] for row in json.loads(self.run_command([ORC, "--json"]).stdout)]
+
+    def join(self, name, handle, window=0):
+        pane = self.tmux("display-message", "-p", "-t", f"={name}:{window}.0", "#{pane_id}").stdout.strip()
         result = self.bus(name, "join", handle, handle, "test", "pull",
-                          socket.gethostname().split('.')[0], f"tmux={name}:0.0 win=test",
+                          socket.gethostname().split('.')[0], f"tmux={name}:{window}.0 win=test",
                           env={**self.env, "TMUX_PANE": pane})
         return json.loads(result.stdout)["agent_id"]
+
+    def open_task(self, name, subject):
+        self.run_command([ORC, "--fleet", name, "open", "--to", "operator",
+                          "--subject", subject, "--body", "Synthetic test task.", "--no-check"])
+
+    def session_environment(self, name):
+        fields = self.tmux("display-message", "-p", "-t", f"={name}:0.0",
+                           "#{socket_path}|#{pid}|#{session_id}|#{pane_id}").stdout.strip().split("|")
+        return {**self.env, "TMUX": f"{fields[0]},{fields[1]},{fields[2][1:]}", "TMUX_PANE": fields[3]}
 
     def configure_handoffs(self):
         directory = self.root / "configured-handoffs"
         directory.mkdir()
-        (directory / "2020-01-01-shared-worker.md").write_text("Default fleet history.\n")
+        (directory / "2020-01-01-shared-worker.md").write_text("Configured fleet history.\n")
         marker = self.root / "publisher-invocations"
         publisher = self.root / "publish-handoff.py"
         publisher.write_text(
@@ -99,15 +110,13 @@ class SessionFleetTest(unittest.TestCase):
         self.config.write_text(json.dumps(config))
         return directory, marker
 
-    def test_native_fleets_isolate_handoff_reads_writes_and_same_named_agents(self):
+    def test_started_fleets_isolate_handoff_reads_writes_and_same_named_agents(self):
         configured, published = self.configure_handoffs()
         notes = {}
         for name in ("alpha", "beta"):
-            self.native_session(name)
+            self.start(name)
             identity = self.join(name, "shared-worker")
-            self.run_command([ORC, "--fleet", name, "open", "--to", "operator",
-                              "--subject", "Synthetic handoff test", "--body",
-                              "Initialize this isolated test ledger.", "--no-check"])
+            self.open_task(name, "Synthetic handoff test")
             view = self.view(name)
             topology = self.run_command([ORC, "--fleet", name, "topology"]).stdout
             onboard = self.run_command([ORC, "--fleet", name, "onboard", identity]).stdout
@@ -131,21 +140,6 @@ class SessionFleetTest(unittest.TestCase):
         self.assertEqual(list(configured.iterdir()), [configured / "2020-01-01-shared-worker.md"])
         self.assertFalse(published.exists())
 
-    def test_default_fleet_retains_configured_handoff_publication(self):
-        configured, published = self.configure_handoffs()
-        self.native_session("0")
-        env = self.session_environment("0")
-        result = self.bus("default", "join", "default-worker", "default-worker", "test", "pull",
-                          socket.gethostname().split('.')[0], "tmux=0:0.0 win=test", env=env)
-        identity = json.loads(result.stdout)["agent_id"]
-        self.run_command([ORC, "--fleet", "default", "checkout", identity,
-                          "--summary", "Default archive publication."])
-        names = published.read_text().splitlines()
-        self.assertEqual(len(names), 1)
-        self.assertIn("Default archive publication.", (configured / names[0]).read_text())
-        self.assertIn("2020-01-01-shared-worker.md",
-                      self.run_command([ORC, "--fleet", "default", "topology"]).stdout)
-
     def test_explicit_legacy_fleet_retains_configured_handoff_publication(self):
         configured, published = self.configure_handoffs()
         legacy_server = self.server + "-legacy"
@@ -165,14 +159,35 @@ class SessionFleetTest(unittest.TestCase):
         self.assertEqual(len(names), 1)
         self.assertIn("Explicit legacy archive publication.", (configured / names[0]).read_text())
 
-    def test_native_sessions_are_fleets_without_profiles_and_keep_buses_separate(self):
+    def test_plain_tmux_sessions_are_not_fleets_until_started(self):
         self.native_session("alpha")
         self.native_session("beta")
-        alpha, beta = self.view("alpha"), self.view("beta")
+        result = self.run_command([ORC, "fleet", "show", "alpha"], check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not exist", result.stderr)
+        self.assertIn("orc fleet alpha start", result.stderr)
+        self.assertEqual(self.inventory(), [])
+        listing = json.loads(self.run_command([ROOT / "scripts/tview", "--list", "--json"]).stdout)
+        self.assertEqual(listing, [])
+        # A plain session cannot be scheduled, entered or registered against.
+        tick = self.run_command([ORC, "admin", "tick", "--dry-run"]).stdout
+        self.assertNotIn("alpha", tick)
+        entered = self.run_command([ROOT / "scripts/tview", "-t", "alpha"], check=False)
+        self.assertNotEqual(entered.returncode, 0)
+        joined = self.bus("alpha", "members", check=False)
+        self.assertNotEqual(joined.returncode, 0)
+
+        started = self.start("alpha").stdout
+        self.assertIn("started fleet 'alpha'", started)
+        self.assertEqual(self.inventory(), ["alpha"])
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "alpha")
+        self.assertTrue((self.root / "fleets/alpha").is_dir())
+        self.assertFalse((self.root / "profiles").exists())
+        alpha = self.view("alpha")
         self.assertEqual(alpha["profile_path"], "")
         self.assertEqual(alpha["tmux_server"], self.server)
-        self.assertNotEqual(alpha["agent_bus_db"], beta["agent_bus_db"])
-        self.assertFalse((self.root / "profiles").exists())
+        self.start("beta")
+        self.assertNotEqual(alpha["agent_bus_db"], self.view("beta")["agent_bus_db"])
         sender = self.join("alpha", "sender")
         self.join("beta", "receiver")
         result = self.bus("alpha", "send", sender, "receiver", "test", "test", check=False)
@@ -180,15 +195,14 @@ class SessionFleetTest(unittest.TestCase):
         self.assertIn("0 active agents", result.stderr)
 
     def test_full_lifecycle_closes_grouped_views_and_preserves_work(self):
-        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.start("alpha")
         self.native_session("beta")
         self.run_command([ORC, "fleet", "window", "alpha"])
         self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-test")
         windows = self.tmux("list-windows", "-t", "=alpha", "-F", "#{window_id}").stdout.splitlines()
         self.assertEqual(len(windows), 2)
         self.join("alpha", "worker")
-        self.run_command([ORC, "--fleet", "alpha", "open", "--to", "operator",
-                          "--subject", "saved work", "--body", "Synthetic test task.", "--no-check"])
+        self.open_task("alpha", "saved work")
         view = self.view("alpha")
         self.run_command([ORC, "fleet", "stop", "alpha"])
         self.assertNotEqual(self.tmux("has-session", "-t", "=alpha", check=False).returncode, 0)
@@ -196,30 +210,143 @@ class SessionFleetTest(unittest.TestCase):
         self.tmux("has-session", "-t", "=beta")
         with sqlite3.connect(view["agent_bus_db"]) as db:
             self.assertEqual(db.execute("SELECT status FROM identities").fetchone()[0], "retired")
+        rows = json.loads(self.run_command([ORC, "--json"]).stdout)
+        self.assertEqual([(row["name"], row["status"]) for row in rows], [("alpha", "stopped")])
+        self.assertIn("orc fleet alpha retire", rows[0]["detail"])
         self.assertIn("saved work", self.run_command([ORC, "--fleet", "alpha", "board"]).stdout)
-        self.run_command([ORC, "fleet", "start", "alpha"])
+        stopped = self.run_command([ORC, "fleet", "stop", "alpha"], check=False)
+        self.assertNotEqual(stopped.returncode, 0)
+        self.assertIn("no running session", stopped.stderr)
+        self.assertIn("started fleet 'alpha'", self.start("alpha").stdout)
         self.assertIn("saved work", self.run_command([ORC, "--fleet", "alpha", "board"]).stdout)
         self.assertFalse((self.root / "profiles").exists())
 
-    def test_existing_process_uses_its_actual_session_without_export_or_restart(self):
-        self.native_session("alpha")
-        self.native_session("beta")
+    def test_retire_archives_saved_work_and_retires_remaining_seats(self):
+        self.start("alpha")
+        self.start("beta")
+        worker = self.join("alpha", "worker")
+        self.open_task("alpha", "unfinished alpha work")
+        view = self.view("alpha")
+        self.run_command([ORC, "fleet", "stop", "alpha"])
+        headless = self.bus("alpha", "join", "helper", "helper", "cron", "pull",
+                            socket.gethostname().split('.')[0], "headless=test")
+        helper = json.loads(headless.stdout)["agent_id"]
+        retired = self.run_command([ORC, "fleet", "alpha", "retire"]).stdout
+        self.assertIn("retired fleet 'alpha'", retired)
+        self.assertIn("1 task(s) were still open", retired)
+        self.assertIn("1 remaining seat registration(s)", retired)
+        archives = list((self.root / "fleets-archive").iterdir())
+        self.assertEqual(len(archives), 1)
+        self.assertTrue(archives[0].name.startswith("alpha-"))
+        self.assertFalse((self.root / "fleets/alpha").exists())
+        self.assertIn(str(archives[0]), retired)
+        archived_bus = archives[0] / Path(view["agent_bus_db"]).relative_to(self.root / "fleets/alpha")
+        with sqlite3.connect(archived_bus) as db:
+            kinds = dict(db.execute("SELECT agent_id, retired_kind FROM identities").fetchall())
+            active = db.execute("SELECT count(*) FROM identities WHERE status='active'").fetchone()[0]
+        self.assertEqual(kinds[helper], "fleet-retired")
+        self.assertEqual(active, 0)
+        self.assertIn(worker, kinds)
+        self.assertEqual(self.inventory(), ["beta"])
+        listing = json.loads(self.run_command([ROOT / "scripts/tview", "--list", "--json"]).stdout)
+        self.assertEqual([row["name"] for row in listing], ["beta"])
+        gone = self.run_command([ORC, "fleet", "show", "alpha"], check=False)
+        self.assertNotEqual(gone.returncode, 0)
+        self.assertIn("does not exist", gone.stderr)
+        again = self.run_command([ORC, "fleet", "alpha", "retire"], check=False)
+        self.assertNotEqual(again.returncode, 0)
+        # The name is free again and starts empty; the archive is not resurrected.
+        self.start("alpha")
+        self.assertIn("No open tasks.", self.run_command([ORC, "--fleet", "alpha", "board"]).stdout)
+        self.assertEqual(len(list((self.root / "fleets-archive").iterdir())), 1)
+        self.tmux("has-session", "-t", "=beta")
+
+    def test_retire_of_a_running_fleet_stops_it_first(self):
+        self.start("alpha")
+        self.join("alpha", "worker")
         self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-test")
-        fields = self.tmux("display-message", "-p", "-t", "=alpha:0.0",
-                           "#{socket_path}|#{pid}|#{session_id}|#{pane_id}").stdout.strip().split("|")
-        env = {**self.env, "TMUX": f"{fields[0]},{fields[1]},{fields[2][1:]}", "TMUX_PANE": fields[3]}
+        self.native_session("beta")
+        self.run_command([ORC, "fleet", "alpha", "retire"])
+        self.assertNotEqual(self.tmux("has-session", "-t", "=alpha", check=False).returncode, 0)
+        self.assertNotEqual(self.tmux("has-session", "-t", "=tview-test", check=False).returncode, 0)
+        self.tmux("has-session", "-t", "=beta")
+        self.assertFalse((self.root / "fleets/alpha").exists())
+        self.assertEqual(self.inventory(), [])
+
+    def test_retire_from_inside_its_own_session_is_refused(self):
+        self.start("alpha")
+        result = self.run_command([ORC, "fleet", "alpha", "retire"],
+                                  env=self.session_environment("alpha"), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("from outside", result.stderr)
+        self.tmux("has-session", "-t", "=alpha")
+        self.assertTrue((self.root / "fleets/alpha").is_dir())
+
+    def test_start_after_tmux_server_death_retires_dead_seats_and_lists_them(self):
+        self.start("alpha")
+        self.run_command([ORC, "fleet", "window", "alpha"])
+        worker = self.join("alpha", "worker", window=1)
+        self.open_task("alpha", "survives the server")
+        view = self.view("alpha")
+        self.tmux("kill-server")
+        rows = json.loads(self.run_command([ORC, "--json"]).stdout)
+        self.assertEqual([(row["name"], row["status"]) for row in rows], [("alpha", "stopped")])
+        with sqlite3.connect(view["agent_bus_db"]) as db:
+            self.assertEqual(db.execute("SELECT status FROM identities WHERE agent_id=?",
+                                        (worker,)).fetchone()[0], "active")
+        started = self.start("alpha").stdout
+        self.assertIn("started fleet 'alpha'", started)
+        self.assertIn("retired 1 seat(s) whose terminals no longer exist", started)
+        self.assertRegex(started, r"window 1\s+test\s+worker")
+        with sqlite3.connect(view["agent_bus_db"]) as db:
+            self.assertEqual(db.execute("SELECT status, retired_kind FROM identities WHERE agent_id=?",
+                                        (worker,)).fetchone(), ("retired", "restart"))
+        self.assertIn("survives the server", self.run_command([ORC, "--fleet", "alpha", "board"]).stdout)
+        # The same slot registers again in the rebuilt session without any manual retirement.
+        successor = self.join("alpha", "worker")
+        self.assertNotEqual(successor, "")
+        self.assertIn("running fleet 'alpha'", self.start("alpha").stdout)
+        with sqlite3.connect(view["agent_bus_db"]) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM identities WHERE status='active'").fetchone()[0], 1)
+
+    def test_hand_made_session_of_a_saved_fleet_is_that_fleet(self):
+        self.start("alpha")
+        self.open_task("alpha", "saved alpha work")
+        self.run_command([ORC, "fleet", "stop", "alpha"])
+        self.native_session("alpha")
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "")
+        rows = json.loads(self.run_command([ORC, "--json"]).stdout)
+        self.assertEqual([(row["name"], row["status"]) for row in rows], [("alpha", "online")])
+        self.assertIn("saved alpha work", self.run_command([ORC, "board"], env=self.session_environment("alpha")).stdout)
+        self.assertIn("running fleet 'alpha'", self.start("alpha").stdout)
+        self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "alpha")
+
+    def test_existing_process_uses_its_actual_session_without_export_or_restart(self):
+        self.start("alpha")
+        self.start("beta")
+        self.native_session("gamma")
+        self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-test")
+        env = self.session_environment("alpha")
         result = self.run_command([BUS, "environment"], env=env)
         self.assertEqual(json.loads(result.stdout)["database"], self.view("alpha")["agent_bus_db"])
-        explicit = self.run_command([BUS, "--fleet", "default", "environment"], env=env)
-        self.assertEqual(json.loads(explicit.stdout)["database"], str(self.root / "default/bus/inbox.sqlite3"))
+        explicit = self.run_command([BUS, "--fleet", "beta", "environment"], env=env)
+        self.assertEqual(json.loads(explicit.stdout)["database"], self.view("beta")["agent_bus_db"])
         self.assertIn("No open tasks.", self.run_command([ORC, "board"], env=env).stdout)
         listing = self.run_command([ROOT / "scripts/tview", "--list"], env=env).stdout
         self.assertIn("alpha", listing)
         self.assertIn("beta", listing)
         self.assertNotIn("tview-test", listing)
+        self.assertNotIn("gamma", listing)
+        plain = self.run_command([ORC, "board"], env=self.session_environment("gamma"), check=False)
+        self.assertNotEqual(plain.returncode, 0)
+        self.assertIn("is not a fleet", plain.stderr)
+        self.assertIn("orc fleet NAME start", plain.stderr)
+        outside = self.run_command([ORC, "board"], check=False)
+        self.assertNotEqual(outside.returncode, 0)
+        self.assertIn("no fleet selected", outside.stderr)
 
     def test_sender_rejects_a_pane_outside_the_selected_session(self):
-        self.native_session("alpha")
+        self.start("alpha")
         self.native_session("beta")
         pane = self.tmux("display-message", "-p", "-t", "=beta:0.0", "#{pane_id}").stdout.strip()
         program = "import runpy,sys; runpy.run_path(sys.argv[1])['pane_info'](sys.argv[2])"
@@ -230,24 +357,21 @@ class SessionFleetTest(unittest.TestCase):
         self.assertIn("outside the selected fleet session", result.stderr)
         self.tmux("has-session", "-t", "=beta")
 
-    def test_numeric_session_keeps_its_terminal_from_another_current_session(self):
-        self.native_session("0")
-        joined = self.bus("default", "join", "worker", "worker", "test", "pull",
-                          socket.gethostname().split('.')[0], "tmux=0:0.0 win=test",
-                          env=self.session_environment("0"))
-        identity = json.loads(joined.stdout)["agent_id"]
+    def test_numeric_fleet_name_keeps_its_terminal_from_another_current_session(self):
+        self.start("0")
+        identity = self.join("0", "worker")
         self.native_session("beta")
         self.tmux("new-session", "-d", "-t", "0", "-s", "tview-test")
         for env in (self.env, self.session_environment("beta")):
             with self.subTest(inside_other_session="TMUX" in env):
                 members = [json.loads(line) for line in
-                           self.bus("default", "members", env=env).stdout.splitlines()]
+                           self.bus("0", "members", env=env).stdout.splitlines()]
                 member = next(row for row in members if row["agent_id"] == identity)
                 self.assertEqual(member["terminal_presence"], "present")
                 self.assertEqual(member["tmux"], "tmux=0:0.0")
 
     def test_stop_from_inside_its_own_window_finishes_the_whole_session(self):
-        self.native_session("alpha")
+        self.start("alpha")
         self.native_session("beta")
         self.join("alpha", "worker")
         database = self.view("alpha")["agent_bus_db"]
@@ -265,29 +389,24 @@ class SessionFleetTest(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM identities").fetchone()[0], "retired")
         self.tmux("has-session", "-t", "=beta")
 
-    def session_environment(self, name):
-        fields = self.tmux("display-message", "-p", "-t", f"={name}:0.0",
-                           "#{socket_path}|#{pid}|#{session_id}|#{pane_id}").stdout.strip().split("|")
-        return {**self.env, "TMUX": f"{fields[0]},{fields[1]},{fields[2][1:]}", "TMUX_PANE": fields[3]}
-
     def test_stale_exports_lose_to_actual_session_but_explicit_nested_scope_survives(self):
-        self.native_session("alpha")
-        self.native_session("beta")
+        self.start("alpha")
+        self.start("beta")
         env = {**self.session_environment("beta"), "NW_FLEET": "alpha",
                "NW_FLEET_PROFILE_APPLIED": "alpha", "NW_FLEET_PRIMARY_SESSION": "alpha"}
         actual = json.loads(self.run_command([BUS, "environment"], env=env).stdout)
         self.assertEqual(actual["database"], self.view("beta")["agent_bus_db"])
         profile = ROOT / "scripts/lib/fleet-profile.py"
-        nested = self.run_command([sys.executable, profile, "exec", "default", "--",
+        nested = self.run_command([sys.executable, profile, "exec", "alpha", "--",
                                    "bash", "-c", 'exec "$1" environment', "test", BUS], env=env)
-        self.assertEqual(json.loads(nested.stdout)["database"], str(self.root / "default/bus/inbox.sqlite3"))
+        self.assertEqual(json.loads(nested.stdout)["database"], self.view("alpha")["agent_bus_db"])
         dead = {**env, "NW_FLEET_COMMAND_SCOPE": "99999999|0|alpha"}
         actual = json.loads(self.run_command([BUS, "environment"], env=dead).stdout)
         self.assertEqual(actual["database"], self.view("beta")["agent_bus_db"])
 
     def test_direct_and_installed_turn_reporter_follow_registration_fleet(self):
-        self.native_session("alpha")
-        self.native_session("beta")
+        self.start("alpha")
+        self.start("beta")
         identity = self.join("beta", "reporter-worker")
         config = json.loads(self.config.read_text())
         # This path resolves differently after selecting the actual fleet.
@@ -310,24 +429,23 @@ class SessionFleetTest(unittest.TestCase):
         with sqlite3.connect(view["dispatch_ledger_db"]) as conn:
             self.assertEqual(conn.execute("SELECT seat, starts, ends FROM seat_presence").fetchall(),
                              [(identity, 2, 2)])
-        self.assertFalse((self.root / "default/tasks.sqlite3").exists())
         self.assertFalse((self.root / "wrong").exists())
-        self.assertFalse((self.root / "fleets/alpha").exists())
+        self.assertFalse(Path(self.view("alpha")["dispatch_ledger_db"]).exists())
         # An explicit descendant selection is respected even from beta's pane.
         selected = self.run_command([
-            sys.executable, "-B", ROOT / "scripts/lib/fleet-profile.py", "exec", "default", "--",
+            sys.executable, "-B", ROOT / "scripts/lib/fleet-profile.py", "exec", "alpha", "--",
             sys.executable, "-B", ROOT / "scripts/orc-turn-report.py", "--kind", "start",
         ], env=env)
         self.assertEqual(selected.stdout, "")
         with sqlite3.connect(view["dispatch_ledger_db"]) as conn:
             self.assertEqual(conn.execute("SELECT starts FROM seat_presence").fetchone(), (2,))
+        self.assertFalse(Path(self.view("alpha")["dispatch_ledger_db"]).exists())
 
     def test_rename_preserves_running_processes_and_history_after_reopen(self):
-        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.start("alpha")
         self.native_session("beta")
         worker = self.join("alpha", "worker")
-        self.run_command([ORC, "--fleet", "alpha", "open", "--to", "operator",
-                          "--subject", "rename history", "--body", "Synthetic test.", "--no-check"])
+        self.open_task("alpha", "rename history")
         before = self.view("alpha")
         pane = self.tmux("list-panes", "-s", "-t", "=alpha", "-F", "#{pane_id}|#{pane_pid}").stdout
         self.run_command([ORC, "fleet", "rename", "alpha", "gamma"])
@@ -335,15 +453,15 @@ class SessionFleetTest(unittest.TestCase):
         self.assertEqual(self.view("gamma")["agent_bus_db"], before["agent_bus_db"])
         self.assertEqual(self.view("alpha")["primary_session"], "gamma")
         self.assertIn(worker, self.bus("gamma", "members").stdout)
-        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.start("alpha")
         self.assertNotEqual(self.tmux("has-session", "-t", "=alpha", check=False).returncode, 0)
         self.run_command([ORC, "fleet", "stop", "gamma"])
-        self.run_command([ORC, "fleet", "start", "gamma"])
+        self.start("gamma")
         self.assertIn("rename history", self.run_command([ORC, "--fleet", "gamma", "board"]).stdout)
         self.assertFalse((self.root / "profiles").exists())
 
     def test_native_rename_keeps_runtime_and_surviving_group_remains_discoverable(self):
-        self.native_session("alpha")
+        self.start("alpha")
         self.native_session("beta")
         self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-existing")
         self.join("alpha", "worker")
@@ -357,17 +475,17 @@ class SessionFleetTest(unittest.TestCase):
         self.assertNotEqual(self.tmux("has-session", "-t", "=tview-existing", check=False).returncode, 0)
         self.tmux("has-session", "-t", "=beta")
 
-    def test_default_group_survives_native_primary_close(self):
-        self.native_session("0")
-        self.tmux("new-session", "-d", "-t", "0", "-s", "tview-default")
-        self.tmux("kill-session", "-t", "=0")
-        self.assertEqual(self.view("default")["primary_session"], "tview-default")
+    def test_group_survives_native_primary_close(self):
+        self.start("alpha")
+        self.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-alpha")
+        self.tmux("kill-session", "-t", "=alpha")
+        self.assertEqual(self.view("alpha")["primary_session"], "tview-alpha")
         listing = json.loads(self.run_command([ROOT / "scripts/tview", "--list", "--json"]).stdout)
-        default = next(row for row in listing if row["name"] == "default")
-        self.assertEqual(default["status"], "online")
+        alpha = next(row for row in listing if row["name"] == "alpha")
+        self.assertEqual(alpha["status"], "online")
 
     def test_rename_refuses_different_history_and_runtime_alias_escape(self):
-        self.run_command([ORC, "fleet", "start", "alpha"])
+        self.start("alpha")
         (self.root / "fleets/taken").mkdir(parents=True)
         result = self.run_command([ORC, "fleet", "rename", "alpha", "taken"], check=False)
         self.assertNotEqual(result.returncode, 0)
@@ -377,33 +495,24 @@ class SessionFleetTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("inside the runtime directory", result.stderr)
 
-    def test_native_first_task_binds_history_but_readers_and_dry_run_do_not(self):
+    def test_start_binds_history_and_readers_never_bind_a_plain_session(self):
         self.native_session("alpha")
-        self.run_command([ORC, "--fleet", "alpha", "board"])
-        self.bus("alpha", "members")
+        plain = self.run_command([ORC, "--fleet", "alpha", "board"], check=False)
+        self.assertNotEqual(plain.returncode, 0)
+        self.run_command([ORC, "admin", "tick", "--dry-run"])
         self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "")
-        self.run_command([ORC, "--fleet", "alpha", "open", "--to", "operator",
-                          "--subject", "native history", "--body", "Synthetic test.", "--no-check"])
+        self.assertFalse((self.root / "fleets/alpha").exists())
+        self.start("alpha")
         self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "alpha")
+        self.open_task("alpha", "started history")
         self.tmux("rename-session", "-t", "=alpha", "renamed")
-        self.assertIn("native history", self.run_command([ORC, "--fleet", "renamed", "board"]).stdout)
+        self.assertIn("started history", self.run_command([ORC, "--fleet", "renamed", "board"]).stdout)
         # A reader must not repair even deliberately removed optional metadata.
         self.tmux("rename-session", "-t", "=renamed", "alpha")
         self.tmux("set-option", "-u", "-t", "alpha", "@orc-runtime")
         self.run_command([ORC, "fleet", "tick", "--dry-run"])
+        self.run_command([ORC, "--fleet", "alpha", "board"])
         self.assertEqual(self.tmux("show-options", "-qv", "-t", "alpha", "@orc-runtime").stdout.strip(), "")
-
-    def test_default_stop_retires_registrations_from_configured_bus_database(self):
-        self.native_session("0")
-        self.native_session("alpha")
-        pane = self.tmux("display-message", "-p", "-t", "=0:0.0", "#{pane_id}").stdout.strip()
-        self.bus("default", "join", "worker", "worker", "test", "pull",
-                 socket.gethostname().split('.')[0], "tmux=0:0.0 win=test",
-                 env={**self.env, "TMUX_PANE": pane})
-        self.run_command([ORC, "fleet", "stop", "default"])
-        with sqlite3.connect(self.root / "default/bus/inbox.sqlite3") as db:
-            self.assertEqual(db.execute("SELECT status FROM identities").fetchone()[0], "retired")
-        self.tmux("has-session", "-t", "=alpha")
 
 
 if __name__ == "__main__":

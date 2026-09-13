@@ -4397,7 +4397,7 @@ class MisfireDefenseTests(StoreTestCase):
         self.assertFalse(wp.dispatch_undelivered(conn, did))
 
 
-class CheckoutHygieneTests(StoreTestCase):
+class CommanderRoutingTests(StoreTestCase):
 
 
     def load_orc(self):
@@ -4425,64 +4425,6 @@ class CheckoutHygieneTests(StoreTestCase):
             (agent_id, wp.now()),
         )
 
-    def test_dirty_checkout_found_with_mtimes_and_exempts(self):
-        orc = self.load_orc()
-        repo = self.make_repo(self.tmp.name)
-        (repo / "junk.log").write_text("x")
-        (repo / "spool").mkdir()
-        (repo / "spool" / "runtime-file").write_text("x")
-        findings = orc.checkout_findings(
-            {"path": str(repo), "kind": "checkout", "exempt": ("spool/",)})
-        self.assertEqual(len(findings), 1)
-        self.assertIn("junk.log", findings[0])
-        self.assertIn("T", findings[0])
-
-    def test_in_repo_worktree_dirs_are_flagged_not_excused(self):
-
-
-        orc = self.load_orc()
-        repo = self.make_repo(self.tmp.name)
-        (repo / ".claude" / "worktrees" / "wt").mkdir(parents=True)
-        (repo / ".claude" / "worktrees" / "wt" / "f").write_text("x")
-        findings = orc.checkout_findings(
-            {"path": str(repo), "kind": "checkout", "exempt": ()})
-        self.assertEqual(len(findings), 1)
-        self.assertIn(".claude/worktrees/wt/f", findings[0])
-
-    def test_clean_is_silent_and_absent_is_reported(self):
-        orc = self.load_orc()
-        repo = self.make_repo(self.tmp.name)
-        self.assertEqual(orc.checkout_findings(
-            {"path": str(repo), "kind": "checkout", "exempt": ()}), [])
-        self.assertEqual(orc.checkout_findings(
-            {"path": str(Path(self.tmp.name) / "nope"), "kind": "checkout",
-             "exempt": ()}), ["MISSING CHECKOUT"])
-
-    def test_failed_inspection_is_not_reported_as_clean(self):
-        orc = self.load_orc()
-        repo = self.make_repo(self.tmp.name)
-        for kind in ("checkout", "bare-hub"):
-            with self.subTest(kind=kind), mock.patch("subprocess.run") as run:
-                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
-                findings = orc.checkout_findings(
-                    {"path": str(repo), "kind": kind, "exempt": ()})
-                self.assertEqual(len(findings), 1)
-                self.assertIn("CHECK FAILED", findings[0])
-        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
-            self.assertEqual(orc.checkout_findings(
-                {"path": str(repo), "kind": "checkout", "exempt": ()}),
-                ["CHECK FAILED: git inspection unavailable"])
-
-    def test_bare_hub_regression_flagged(self):
-        orc = self.load_orc()
-        hub = self.make_repo(self.tmp.name, bare=True)
-        self.assertEqual(orc.checkout_findings(
-            {"path": str(hub), "kind": "bare-hub", "exempt": ()}), [])
-        nonbare = self.make_repo(self.tmp.name)
-        self.assertEqual(orc.checkout_findings(
-            {"path": str(nonbare), "kind": "bare-hub", "exempt": ()}),
-            ["NON-BARE"])
-
     def test_one_alert_per_pathset_per_day(self):
         conn = wp.connect_writable()
         with conn:
@@ -4499,44 +4441,6 @@ class CheckoutHygieneTests(StoreTestCase):
                                    "hygiene:/x:abc:123", "cmd-1", "s", "b")
         self.assertIsNotNone(first)
         self.assertIsNone(second)
-
-    def test_unheld_checkout_recipient_uses_operator_queue_and_closes_when_clean(self):
-        conn = wp.connect_writable()
-        orc = self.load_orc()
-        path = self.make_repo(self.tmp.name)
-        dirt = path / "unexpected.tmp"
-        dirt.write_text("unexpected file")
-        repo = {"path": str(path), "kind": "checkout", "exempt": ()}
-        with mock.patch.object(orc, "WATCHED_CHECKOUTS", [repo]), \
-                mock.patch.object(wp, "bus_send") as send:
-            orc.tick_checkout_hygiene(conn, dry=True)
-            self.assertEqual(conn.execute("SELECT count(*) FROM dispatch").fetchone()[0], 0)
-            orc.tick_checkout_hygiene(conn, dry=False)
-            orc.tick_checkout_hygiene(conn, dry=False)
-            rows = conn.execute("SELECT * FROM dispatch").fetchall()
-            self.assertEqual(len(rows), 1)
-            task = rows[0]
-            self.assertEqual(task["recipient"], "operator")
-            self.assertTrue(wp.waits_on_operator(conn, task))
-            self.assertIn("unexpected.tmp", task["body"])
-            self.assertEqual(conn.execute("SELECT count(*) FROM task_msg").fetchone()[0], 0)
-            with mock.patch("subprocess.run") as run:
-                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
-                orc.tick_checkout_hygiene(conn, dry=False)
-            self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")
-            self.assertIn("CHECK FAILED", wp.fetch(conn, task["id"])["body"])
-            dirt.unlink()
-            orc.tick_checkout_hygiene(conn, dry=True)
-            self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")
-            orc.tick_checkout_hygiene(conn, dry=False)
-            self.assertEqual(wp.fetch(conn, task["id"])["state"], "closed")
-            self.assertEqual(wp.fetch(conn, task["id"])["resolution"], "done")
-            dirt.write_text("recurring dirt")
-            orc.tick_checkout_hygiene(conn, dry=False)
-            self.assertEqual(conn.execute(
-                "SELECT count(*) FROM dispatch WHERE state!='closed'"
-            ).fetchone()[0], 1)
-        send.assert_not_called()
 
     def test_empty_commander_keeps_escalation_on_the_original_task(self):
         conn = wp.connect_writable()
@@ -4610,7 +4514,7 @@ class CheckoutHygieneTests(StoreTestCase):
 
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
-            "tick_checkout_hygiene", "tick_seat_liveness",
+            "tick_seat_liveness",
             "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
@@ -4681,7 +4585,7 @@ class CheckoutHygieneTests(StoreTestCase):
 
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
-            "tick_checkout_hygiene", "tick_seat_liveness",
+            "tick_seat_liveness",
             "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
@@ -4764,7 +4668,7 @@ class CheckoutHygieneTests(StoreTestCase):
 
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
-            "tick_checkout_hygiene", "tick_seat_liveness",
+            "tick_seat_liveness",
             "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
@@ -4823,7 +4727,7 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertEqual([n["target"] for n in notices],
                          ["requester", "requester"])
         self.assertIn(question, notices[0]["body"])
-        self.assertIn(f"{ROOT / 'scripts' / 'orc'} -t default task show {did}",
+        self.assertIn(f"{ROOT / 'scripts' / 'orc'} task show {did}",
                       notices[0]["body"])
         self.assertFalse(wp.message_is_current_responsibility(
             conn, notices[0], task),
@@ -5012,40 +4916,6 @@ class CheckoutHygieneTests(StoreTestCase):
                 conn, did, "seat-a", "pull",
                 wp.continuation_context(conn, row)["generation"],
             ), "the old unresolved wake clock must not suppress the new duty")
-
-    def test_legacy_checkout_alert_stays_inert_and_current_fact_records_once(self):
-        conn = wp.connect_writable()
-        stamp = wp.now() - 60
-        with conn:
-            self.grant_commander(conn)
-            old_id = self.record_current_message(
-                conn, "hygiene", "checkout-dirty", "hygiene:/x:old:1",
-                "commander-a", "old checkout alert", "dirty paths",
-            )
-            conn.execute(
-                "UPDATE task_msg SET send_state='failed',attempts=1,at_ms=?,"
-                " escalated_to_operator=1"
-                " WHERE id=?", (stamp, old_id),
-            )
-        old = conn.execute("SELECT * FROM task_msg WHERE id=?", (old_id,)).fetchone()
-        self.assertFalse(wp.message_is_sendable(conn, old))
-        orc = self.load_orc()
-        repo = {"path": "/shared/main", "kind": "checkout", "exempt": ()}
-        with mock.patch.object(orc, "WATCHED_CHECKOUTS", [repo]), \
-                mock.patch.object(orc, "checkout_findings",
-                                  return_value=["?? leaked.tmp\t2026-08-26"]), \
-                mock.patch.object(wp, "bus_send", return_value=True) as send:
-            orc.tick_checkout_hygiene(conn, dry=False)
-            orc.tick_checkout_hygiene(conn, dry=False)
-        self.assertEqual(send.call_count, 1)
-        rows = conn.execute(
-            "SELECT * FROM task_msg WHERE purpose='checkout-dirty' ORDER BY id"
-        ).fetchall()
-        self.assertEqual([row["target"] for row in rows],
-                         ["commander-a", "role:commander"])
-        self.assertEqual((rows[0]["at_ms"], rows[0]["attempts"]), (stamp, 1))
-        self.assertIn("role-generation-", rows[1]["dedup_key"])
-        conn.close()
 
     def test_legacy_commander_notices_never_revive(self):
         conn = wp.connect_writable()
@@ -7057,7 +6927,7 @@ class HandshakeTests(StoreTestCase):
         logs = []
         noops = (
             "tick_parents", "tick_pr_guards", "tick_review_reconcile",
-            "tick_checkout_hygiene", "tick_seat_liveness",
+            "tick_seat_liveness",
             "tick_reviewer_rotation",
         )
         patches = [mock.patch.object(orc, name, return_value=None)
@@ -9114,7 +8984,8 @@ class NudgeCoalesceTests(StoreTestCase):
             def send_outcome(*a, **k):
                 calls.append((a, k))
                 return (SendOutcome.CONTACTED, "")
-        sent = self.orc.flush_seat_nudges(conn, plan, FakeSend)
+        with mock.patch.dict(os.environ, {"NW_FLEET": "alpha"}):
+            sent = self.orc.flush_seat_nudges(conn, plan, FakeSend)
         self.assertEqual(len(calls), 1, "three due tasks, ONE pane touch")
         self.assertEqual(sent, 1)
         args, kwargs = calls[0]
@@ -9123,8 +8994,7 @@ class NudgeCoalesceTests(StoreTestCase):
         self.assertIn("This reminder grants no authority", reminder)
         for did, _generation in plan["tmux9"]["due"]:
             self.assertIn(did, reminder)
-            self.assertIn(f"task show {did}", reminder)
-            self.assertIn("orc -t ", reminder)
+            self.assertIn(f"orc -t alpha task show {did}", reminder)
         self.assertNotIn("nudge_key", kwargs,
                          "an actionable reminder keeps the peer-message header")
         fails = conn.execute("SELECT SUM(fails) FROM wake_attempt").fetchone()[0]

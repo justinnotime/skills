@@ -42,21 +42,30 @@ Preserve any named fleet selector on every call. Failure to resolve one fleet
 must not redirect an operation to another. Test or development commands must
 use isolated state rather than an implicit production database.
 
-For terminal entry, use `scripts/tview --list` to discover configured fleets and
-their actual tmux availability. Select `--fleet NAME` explicitly when switching
-fleets; `default` and its caller-configured alias refer to the same fleet. Inside
-tmux, an unselected `tview` follows the actual associated session, not a stale
-fleet environment variable. Inherited `TMUX` and `TMUX_PANE` count as inside
+For terminal entry, use `scripts/tview --list` to discover fleets and their
+actual tmux availability. Select `--fleet NAME` explicitly when switching
+fleets. Inside tmux, an unselected `tview` follows the actual associated
+session, not a stale fleet environment variable; outside tmux it needs
+`--fleet NAME` or `NW_FLEET`. Inherited `TMUX` and `TMUX_PANE` count as inside
 tmux only while the server that set them still owns that pane; a stale pair,
 such as one passed down by a daemon started in a pane, means outside tmux.
 Listing and entering do not start offline fleets.
 
-Ordinary local fleets are the live tmux session groups on the configured server;
-their names select separate task and message stores without a fleet profile.
-No separate `tmux new-session` step is required: `orc fleet NAME start` creates
-or reuses the named tmux session. `orc fleet NAME window` adds a window, and
-`orc fleet NAME stop` terminates its windows and agents,
-including grouped viewer sessions, while retaining saved work. For the current session, `orc window` and `orc stop` omit the selector. Native tmux sessions are discovered automatically.
+Configuring `fleets.runtime_directory` selects fleet mode; without it the
+package is one standalone store and no command needs a fleet. In fleet mode a
+fleet is a tmux session that `orc fleet NAME start` created or resumed,
+bound to saved work under the configured fleet runtime directory; its name
+selects separate task and message stores without a fleet profile. A plain tmux
+session is a terminal, never a fleet: it is not listed, scheduled, entered or
+joined. `orc fleet NAME window` adds a window. `orc fleet NAME stop` pauses the
+fleet: it terminates its windows and agents, including grouped viewer sessions,
+and retains saved work. `orc fleet NAME retire` ends the fleet: it stops it if
+running, retires the remaining seat registrations and moves the saved work to
+the archive directory beside the fleet runtime directory; run it from outside
+the fleet's own session. `start` on a fleet whose tmux server died retires the
+seats whose terminals no longer exist and lists them, so each can be reopened
+in its own window and registered again. For the current session, `orc window`
+and `orc stop` omit the selector.
 `tview --fleet NAME` opens a view of the same windows; its grouped viewer
 sessions do not duplicate agents or create another fleet. Creating terminals
 and starting/registering agents are separate operations; follow normal
@@ -75,12 +84,13 @@ registration-time window number, and does not prove model responsiveness.
 Bare commands inside tmux follow its actual session. An explicit fleet applies
 to that command and its descendants, not later unrelated commands.
 
-Use one caller-configured `orc admin tick` schedule for the default fleet and
-live local fleets with saved task databases. It discovers groups each time,
-uses existing per-store engine locks and isolates failures. Local fleets do not
-inherit the default fleet's repository patrol. Starting
-a fleet needs no separate cron entry. The machine must have this one schedule
-configured; explicit legacy/network profiles retain their caller-owned schedules.
+Use one caller-configured `orc admin tick` schedule. It discovers the live
+fleets each time, schedules those with saved task databases under their own
+store locks, isolates failures, and then runs the machine-level checkout patrol
+for `watched_repositories`, which writes a status file and log lines rather
+than fleet tasks. Starting a fleet needs no separate cron entry. The machine
+must have this one schedule configured; explicit legacy/network profiles
+retain their caller-owned schedules.
 
 For a status or health request, start with the configured read-only board,
 operator-wait view, task history and diagnostics. Separate these observations:

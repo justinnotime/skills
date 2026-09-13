@@ -707,14 +707,6 @@ def _join_pane_guard(conn: sqlite3.Connection, slot: str, host: str,
 
 def cmd_join(args: argparse.Namespace) -> None:
     args.harness = validated_harness(args.harness, args.mode, args.tmux)
-    fleet_name = os.environ.get("NW_FLEET", "").strip()
-    if is_local_transport() and fleet_name and fleet_name != "default":
-        profile = fleet_profile_module()
-        selected = profile.resolve(fleet_name, os.environ)
-        if selected and not selected["NW_FLEET_PROFILE_PATH"]:
-            # The first real write records the history key on tmux. Pure member,
-            # board and dry-run queries must never create this identity binding.
-            profile.bind_local_session(fleet_name, os.environ)
     conn = db()
     pane_id = os.environ.get("TMUX_PANE", "").strip() or None
     server_id = None
@@ -2063,7 +2055,7 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="command", required=True)
     j = sub.add_parser("join"); j.add_argument("handle"); j.add_argument("slot"); j.add_argument("harness"); j.add_argument("mode", choices=["watch", "pull"]); j.add_argument("host"); j.add_argument("tmux"); j.set_defaults(func=cmd_join)
-    r = sub.add_parser("retire"); r.add_argument("identity"); r.add_argument("--kind", choices=["manual", "checkout", "reaper", "succession"], default="manual"); r.set_defaults(func=cmd_retire)
+    r = sub.add_parser("retire"); r.add_argument("identity"); r.add_argument("--kind", choices=["manual", "checkout", "reaper", "succession", "restart", "fleet-retired"], default="manual"); r.set_defaults(func=cmd_retire)
     e = sub.add_parser("expire", help="tombstone pending inbox rows: stale by"
                                       " declaration, never forged-processed")
     e.add_argument("--msg", default=""); e.add_argument("--agent", default="")

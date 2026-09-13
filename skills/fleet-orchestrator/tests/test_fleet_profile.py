@@ -203,42 +203,6 @@ esac
         self.assertNotIn("AGENT_BUS_CFG", selected)
         self.assertEqual(selected["MATRIX_BUS_CFG"], str(self.matrix / "alpha"))
 
-    def test_default_keeps_legacy_environment(self):
-        original = {
-            "NW_TMUX_SERVER": "manual-default",
-            "DISPATCH_LEDGER_DB": "/tmp/manual.sqlite3",
-        }
-        selected = fleet_profile.command_env("default", original)
-        self.assertEqual(selected["NW_TMUX_SERVER"], "manual-default")
-        self.assertEqual(selected["DISPATCH_LEDGER_DB"], "/tmp/manual.sqlite3")
-        self.assertNotIn("NW_FLEET", selected)
-        self.assertNotIn("NW_FLEET_PROFILE_APPLIED", selected)
-
-    def test_default_drops_an_unmarked_local_bus_selection(self):
-        selected = fleet_profile.command_env("default", {
-            "AGENT_BUS_TRANSPORT": "local",
-            "AGENT_BUS_CFG": "/tmp/local-bus",
-            "AGENT_BUS_DB": "/tmp/local-bus/db.sqlite3",
-            "DISPATCH_LEDGER_DB": "/tmp/manual-ledger.sqlite3",
-        })
-        self.assertNotIn("AGENT_BUS_TRANSPORT", selected)
-        self.assertNotIn("AGENT_BUS_CFG", selected)
-        self.assertNotIn("AGENT_BUS_DB", selected)
-        self.assertEqual(
-            selected["DISPATCH_LEDGER_DB"], "/tmp/manual-ledger.sqlite3"
-        )
-
-    def test_explicit_default_removes_an_inherited_named_profile(self):
-        self.write_profile()
-        named = fleet_profile.command_env("alpha", self.env)
-        selected = fleet_profile.command_env("default", named)
-        self.assertEqual(selected["NW_TMUX_SERVER"], "default")
-        for key in ("NW_FLEET", "NW_FLEET_PROFILE_APPLIED",
-                    "NOTES_RUNTIME_DIR", "MATRIX_BUS_CFG", "DISPATCH_LEDGER_DB",
-                    "AGENT_BUS_TRANSPORT", "AGENT_BUS_CFG", "AGENT_BUS_DB",
-                    "MATRIX_BUS_ROOM", "MATRIX_BUS_REGISTRY_ROOM"):
-            self.assertNotIn(key, selected)
-
     def test_local_profile_is_bound_to_its_creating_host(self):
         self.write_local_profile(local_host="some-other-host")
         with self.assertRaisesRegex(fleet_profile.FleetProfileError,
@@ -314,7 +278,7 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("profile is invalid", result.stderr)
 
-    def test_default_adapter_supports_configured_local_transport(self):
+    def test_unselected_adapter_supports_explicit_local_paths(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "agent-bus-v3.py"),
              "source-identity"],
@@ -452,28 +416,30 @@ esac
             (self.runtime / "beta" / bus_rel).resolve(),
         )
 
-    def test_orc_without_fleet_keeps_legacy_database_override(self):
-        db = self.base / "legacy" / "ledger.sqlite3"
-        env = {
-            **os.environ,
-            "DISPATCH_LEDGER_DB": str(db),
-            "MATRIX_BUS_CFG": str(self.base / "legacy" / "bus"),
-            "NOTES_RUNTIME_DIR": str(self.base / "legacy" / "runtime"),
-            "AGENT_BUS_DB": str(self.base / "legacy" / "agent-bus.sqlite3"),
-            "DISPATCH_LEDGER_ACTOR": "profile-test",
-        }
-        opened = subprocess.run(
-            [str(ROOT / "scripts" / "orc"), "open", "--to", "tmux3",
-             "--subject", "legacy-default", "--no-check"],
-            env=env, text=True, capture_output=True, check=False,
-        )
-        self.assertEqual(opened.returncode, 0, opened.stderr + opened.stdout)
-        board = subprocess.run(
-            [str(ROOT / "scripts" / "orc"), "board"], env=env,
+    def test_orc_without_fleet_outside_tmux_refuses_instead_of_guessing_a_store(self):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("NW_", "AGENT_BUS_", "MATRIX_BUS_", "DISPATCH_LEDGER_"))
+               and k not in {"TMUX", "TMUX_PANE", "NOTES_RUNTIME_DIR"}}
+        env.update(self.env)  # NW_FLEET_RUNTIME_ROOT selects fleet mode; no store is named
+        for command in (["open", "--to", "tmux3", "--subject", "no-fleet", "--no-check"], ["board"]):
+            with self.subTest(command=command[0]):
+                result = subprocess.run(
+                    [str(ROOT / "scripts" / "orc"), *command],
+                    env=env, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("no fleet selected", result.stderr)
+        self.assertFalse(list(self.base.rglob("*.sqlite3")))
+        # An explicitly named store is a standalone selection, not a guess.
+        ledger = self.base / "explicit" / "ledger.sqlite3"
+        result = subprocess.run(
+            [str(ROOT / "scripts" / "orc"), "open", "--to", "tmux3", "--subject", "standalone",
+             "--no-check"],
+            env={**env, "DISPATCH_LEDGER_DB": str(ledger), "DISPATCH_LEDGER_ACTOR": "profile-test"},
             text=True, capture_output=True, check=False,
         )
-        self.assertEqual(board.returncode, 0, board.stderr)
-        self.assertIn("legacy-default", board.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(ledger.is_file())
 
     def test_orc_fleet_create_is_atomic_idempotent_and_starts_primary_session(self):
         env = {**os.environ, **self.env, **self.tmux_env, "TMUX": "leaked-client"}
@@ -758,25 +724,6 @@ esac
                                     "must be one https origin"):
             fleet_profile.resolve("alpha", self.env)
 
-    def test_default_matrix_rooms_are_refused(self):
-        config = self.base / "config.json"
-        config.write_text(json.dumps({"matrix": {"room": "!default:example.test"}}))
-        self.env["FLEET_ORCHESTRATOR_CONFIG"] = str(config)
-        self.write_profile(matrix_room="!default:example.test")
-        with self.assertRaisesRegex(fleet_profile.FleetProfileError,
-                                    "reuses a default Matrix room"):
-            fleet_profile.resolve("alpha", self.env)
-
-    def test_legacy_default_matrix_override_is_also_refused(self):
-        self.write_profile(matrix_room="!legacy-default:example.test")
-        env = {
-            **self.env,
-            "MATRIX_BUS_ROOM": "!legacy-default:example.test",
-        }
-        with self.assertRaisesRegex(fleet_profile.FleetProfileError,
-                                    "reuses a default Matrix room"):
-            fleet_profile.resolve("alpha", env)
-
     def test_room_or_server_reuse_between_named_fleets_is_refused(self):
         self.write_profile("alpha")
         self.write_profile("beta", tmux_server="nw-alpha")
@@ -789,22 +736,20 @@ esac
                                     "reuse a Matrix room"):
             fleet_profile.resolve("alpha", self.env)
 
-    def test_default_tmux_server_reuse_is_refused(self):
+    def test_local_fleet_tmux_server_reuse_is_refused(self):
         selector = (Path(self.env["HOME"]) / ".local/state/fleet-orchestrator"
                     / "state/fleet-orchestrator/tmux-server")
         selector.parent.mkdir(parents=True)
         selector.write_text("nw-alpha\n")
         self.write_profile("alpha")
         with self.assertRaisesRegex(fleet_profile.FleetProfileError,
-                                    "reuses the default tmux server"):
+                                    "reuses the local fleet tmux server"):
             fleet_profile.resolve("alpha", self.env)
-
-    def test_inherited_legacy_tmux_server_reuse_is_refused(self):
-        self.write_profile("alpha")
-        env = {**self.env, "NW_TMUX_SERVER": "nw-alpha"}
+        env = {**self.env, "NW_DEFAULT_TMUX_SERVER": "nw-beta"}
+        self.write_profile("beta")
         with self.assertRaisesRegex(fleet_profile.FleetProfileError,
-                                    "reuses the default tmux server"):
-            fleet_profile.resolve("alpha", env)
+                                    "reuses the local fleet tmux server"):
+            fleet_profile.resolve("beta", env)
 
     def test_profile_symlink_is_refused(self):
         real = self.base / "outside.json"
@@ -814,12 +759,13 @@ esac
         with self.assertRaisesRegex(fleet_profile.FleetProfileError, "symlink"):
             fleet_profile.resolve("alpha", self.env)
 
-    def test_name_validation_blocks_paths_and_reserved_default_has_no_file(self):
+    def test_name_validation_blocks_paths_and_default_is_an_ordinary_name(self):
         for name in ("../alpha", "Alpha", "a_b", "a" * 33):
             with self.subTest(name=name):
                 with self.assertRaises(fleet_profile.FleetProfileError):
                     fleet_profile.profile_path(name, self.env)
-        self.assertEqual(fleet_profile.resolve("default", self.env), {})
+        with self.assertRaisesRegex(fleet_profile.FleetProfileError, "does not exist"):
+            fleet_profile.resolve("default", self.env)
 
 
 if __name__ == "__main__":

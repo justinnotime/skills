@@ -91,26 +91,27 @@ def test_all_grouped_commands_offer_argument_help_without_writing_state(fleet):
         ("task", "claim-done"), ("review", "verdict"), ("review", "receipt"),
         ("agent", "role"), ("goal", "team"),
     ]:
-        text = orc(fleet, "fleet", "default", group, action, "--help").stdout
-        assert f"orc fleet default {group} {action}" in text
-    goal = orc(fleet, "fleet", "default", "goal", "open", "--help").stdout
-    task = orc(fleet, "fleet", "default", "task", "open", "--help").stdout
+        text = orc(fleet, "fleet", "example", group, action, "--help").stdout
+        assert f"orc fleet example {group} {action}" in text
+    goal = orc(fleet, "fleet", "example", "goal", "open", "--help").stdout
+    task = orc(fleet, "fleet", "example", "task", "open", "--help").stdout
     for option in ("--workflow", "--owner", "--reviewer", "--ready-cmd", "--done-cmd"):
         assert option not in goal
         assert option in task
     assert "--to" in goal and "--subject" in goal and "--parent" in task
-    onboard = orc(fleet, "fleet", "default", "agent", "onboard", "--help").stdout
+    onboard = orc(fleet, "fleet", "example", "agent", "onboard", "--help").stdout
     paths = re.findall(r"(/\S+/references/agent-bus\.md)", onboard)
     assert paths and all(sessions.Path(path).is_file() for path in paths)
     assert list(fleet.root.rglob("*")) == before
 
 
 def test_invalid_leaf_arguments_keep_the_selected_command_usage(fleet):
+    orc(fleet, "fleet", "alpha", "start")
     before = list(fleet.root.rglob("*"))
-    result = orc(fleet, "fleet", "default", "task", "show", "example-id",
+    result = orc(fleet, "fleet", "alpha", "task", "show", "example-id",
                  "--unknown-option", check=False)
     assert result.returncode == 2
-    assert "orc fleet default task show" in result.stderr
+    assert "orc fleet alpha task show" in result.stderr
     assert "unrecognized arguments" in result.stderr
     assert "{open,dispatch" not in result.stderr
     assert list(fleet.root.rglob("*")) == before
@@ -197,18 +198,34 @@ def test_rename_stop_and_reopen_keep_history_discoverable(fleet):
     fleet.tmux("new-session", "-d", "-t", "alpha", "-s", "tview-private")
     orc(fleet, "fleet", "alpha", "rename", "renamed")
     rows = json.loads(orc(fleet, "--json").stdout)
-    assert [r["name"] for r in rows] == ["default", "renamed"]
+    assert [r["name"] for r in rows] == ["renamed"]
     orc(fleet, "fleet", "renamed", "stop")
     rows = json.loads(orc(fleet, "--json").stdout)
-    assert [r["name"] for r in rows] == ["default", "renamed"]
-    row = rows[1]
-    assert row["work"]["tasks"] == 1 and row["status"] != "online"
+    assert [r["name"] for r in rows] == ["renamed"]
+    row = rows[0]
+    assert row["work"]["tasks"] == 1 and row["status"] == "stopped"
     assert task in orc(fleet, "fleet", "renamed", "board").stdout
     catalog = json.loads(fleet.run_command([sessions.ROOT / "scripts/tview", "--list", "--json"]).stdout)
     assert [r["name"] for r in catalog] == [r["name"] for r in rows]
     orc(fleet, "fleet", "renamed", "start")
     assert fleet.view("renamed")["dispatch_ledger_db"] == database
     assert task in orc(fleet, "fleet", "renamed", "board").stdout
+
+
+def test_retire_removes_a_fleet_from_every_listing_and_frees_its_name(fleet):
+    orc(fleet, "fleet", "alpha", "start")
+    orc(fleet, "fleet", "beta", "start")
+    task = open_task(fleet, "alpha", "archived alpha work")
+    text = orc(fleet, "fleet", "alpha", "retire").stdout
+    assert "retired fleet 'alpha'" in text and "fleets-archive" in text
+    assert [r["name"] for r in json.loads(orc(fleet, "--json").stdout)] == ["beta"]
+    catalog = json.loads(fleet.run_command([sessions.ROOT / "scripts/tview", "--list", "--json"]).stdout)
+    assert [r["name"] for r in catalog] == ["beta"]
+    result = orc(fleet, "fleet", "alpha", "board", check=False)
+    assert result.returncode != 0 and task not in result.stdout
+    orc(fleet, "fleet", "alpha", "start")
+    assert task not in orc(fleet, "fleet", "alpha", "board").stdout
+    assert "retire" in orc(fleet, "--help").stdout
 
 
 def test_invalid_selection_and_corrupt_work_are_not_an_empty_fleet(fleet):

@@ -1726,15 +1726,14 @@ def frontier_tasks(conn, rows) -> list[sqlite3.Row]:
 
 
 def fleet_label() -> dict:
-    name = os.environ.get("NW_FLEET") or cfg.get("fleets.default_name", "default")
-    if name == "default":
-        name = cfg.get("fleets.default_name", "default")
-    return {"name": name, "session": os.environ.get("NW_FLEET_PRIMARY_SESSION")
-            or cfg.get("tmux.primary_session", "0")}
+    return {"name": os.environ.get("NW_FLEET") or "(unselected)",
+            "session": os.environ.get("NW_FLEET_PRIMARY_SESSION") or ""}
 
 
 def fleet_heading() -> str:
     fleet = fleet_label()
+    if not fleet["session"]:
+        return f"Fleet {fleet['name']}"
     return f"Fleet {fleet['name']} | session {fleet['session']}"
 
 
@@ -3074,132 +3073,6 @@ def tick_breakers(conn, dry: bool) -> int:
     return fired
 
 
-WATCHED_CHECKOUTS = tuple(cfg.get("watched_repositories", []))
-
-
-def checkout_findings(repo: dict) -> list[str]:
-
-
-    import subprocess as sp
-    from datetime import datetime, timezone as tz
-    root = Path(cfg.expand(repo["path"]))
-    if not root.exists():
-        return ["MISSING CHECKOUT"]
-    try:
-        if repo["kind"] == "bare-hub":
-            out = sp.run(["git", "-C", str(root), "rev-parse", "--is-bare-repository"],
-                         text=True, capture_output=True, timeout=15)
-            if out.returncode == 0 and out.stdout.strip() == "false":
-                return ["NON-BARE"]
-            if out.returncode:
-                return [f"CHECK FAILED: git rev-parse exited {out.returncode}"]
-            return []
-
-
-        out = sp.run(["git", "-C", str(root), "status", "--porcelain",
-                      "--ignored=no", "--untracked-files=all"],
-                     text=True, capture_output=True, timeout=30)
-        if out.returncode != 0:
-            return [f"CHECK FAILED: git status exited {out.returncode}"]
-    except (OSError, sp.TimeoutExpired):
-        return ["CHECK FAILED: git inspection unavailable"]
-    findings = []
-    for line in out.stdout.splitlines():
-        if len(line) < 4:
-            continue
-        rel = line[3:].split(" -> ")[-1].strip().strip('"')
-        if any(rel.startswith(e) for e in repo.get("exempt", ())):
-            continue
-        f = root / rel
-        try:
-            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz.utc)                 .isoformat(timespec="seconds")
-        except OSError:
-            mtime = "(gone)"
-        findings.append(f"{line[:2]} {rel}\t{mtime}")
-    return findings
-
-
-def retire_checkout_messages(conn, path: str) -> None:
-    conn.execute(
-        "UPDATE task_msg SET send_state='superseded-before-contact',"
-        " processed='superseded-before-contact',"
-        " last_error='checkout alert no longer requires message delivery'"
-        " WHERE task_id='hygiene' AND purpose='checkout-dirty'"
-        " AND instr(dedup_key, ?)=1"
-        " AND send_state IN ('recorded','failed')",
-        (f"hygiene:{path}:",),
-    )
-
-
-def tick_checkout_hygiene(conn, dry: bool) -> None:
-    import hashlib as hl
-    for repo in WATCHED_CHECKOUTS:
-        findings = checkout_findings(repo)
-        operator_link = f"checkout-hygiene:{repo['path']}"
-        operator_task = conn.execute(
-            "SELECT * FROM dispatch WHERE links=? AND recipient='operator'"
-            " AND workflow='dispatch' AND no_chase=1 AND state IN ('open','acked')"
-            " ORDER BY created_ms DESC LIMIT 1", (operator_link,),
-        ).fetchone()
-        if not findings:
-            if not dry:
-                # Drop obsolete delivery work, retaining the sampled evidence.
-                with conn:
-                    retire_checkout_messages(conn, repo['path'])
-                    if operator_task is not None:
-                        conn.execute(
-                            "UPDATE dispatch SET state=?, resolution='done',"
-                            " ask_flag=0,last_event=? WHERE id=?",
-                            (wp.step_row(operator_task, "close"), wp.now(), operator_task['id']),
-                        )
-                        wp.record(conn, operator_task['id'], "close:done",
-                                  f"Scheduled checkout inspection found no changes: {repo['path']}")
-                        wp.claim_settle_terminal(conn, operator_task['id'], "done")
-            continue
-        digest = hl.sha1("\n".join(sorted(findings)).encode()).hexdigest()[:12]
-        day = wp.now() // 86400
-        dedup = f"hygiene:{repo['path']}:{digest}:{day}"
-        if dry:
-            log(f"DRY hygiene: {repo['path']} dirty ({len(findings)} finding(s))")
-            continue
-        commander = "role:commander"
-        shown = findings[:50]
-        more = f"\n... and {len(findings) - 50} more" if len(findings) > 50 else ""
-        body = (f"The shared checkout {repo['path']} is not clean. Paths"
-                f" with mtimes (fresh evidence for attribution - correlate"
-                f" with pane activity now, it decays fast):\n\n"
-                + "\n".join(shown) + more
-                + "\n\nExempt prefixes honored. One alert per path-set"
-                f" per day; changes to the set re-alert.")
-        if operator_task is not None or not wp.role_holders(conn, "commander"):
-            body += ("\n\nInspect and resolve these local changes. This item is"
-                     " checked by the existing checkout patrol, which closes it"
-                     " after a clean inspection; it needs no separate check command.")
-            with conn:
-                retire_checkout_messages(conn, repo['path'])
-                if operator_task is None:
-                    wp.insert_task(
-                        conn, recipient="operator", no_chase=1, repo=repo['path'],
-                        subject=f"shared checkout dirty: {repo['path']}"[:160],
-                        body=body, links=operator_link,
-                    )
-                    log(f"OK hygiene recorded in operator queue: {repo['path']}")
-                elif operator_task['body'] != body:
-                    conn.execute("UPDATE dispatch SET body=?,last_event=? WHERE id=?",
-                                 (body, wp.now(), operator_task['id']))
-                    wp.record(conn, operator_task['id'], "auto-note", body)
-            continue
-        with conn:
-            row_id = wp.record_msg(conn, "hygiene", "checkout-dirty", dedup,
-                                   commander,
-                                   f"shared checkout dirty: {repo['path']}"[:160],
-                                   body)
-        if row_id is None:
-            continue
-        wp.bus_send(conn, row_id)
-        log(f"OK hygiene alert: {repo['path']} ({len(findings)} finding(s))")
-
-
 def continuation_pairs(conn, *, registry_trusted: bool = True) -> list[tuple]:
 
     pairs = []
@@ -3245,9 +3118,6 @@ def cmd_tick(args: argparse.Namespace) -> int:
         route_observation_id=route_observation_id)
     tick_pr_guards(conn, dry, pool_registry_fresh=(dry or registry_fresh))
     tick_review_reconcile(conn, dry)
-    local_session = _automatic_local_fleet()
-    if not local_session:
-        tick_checkout_hygiene(conn, dry)
     if dry or registry_fresh:
         tick_seat_liveness(conn, dry, members=conn.members)
     if not dry and not wp.wake_shadow_off():

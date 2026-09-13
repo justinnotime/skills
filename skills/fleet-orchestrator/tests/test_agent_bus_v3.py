@@ -1462,25 +1462,14 @@ class AgentBusLocalTransportTest(unittest.TestCase):
                     bus.validate_fleet_scope()
                 self.assertEqual(os.environ["NW_FLEET_PRIMARY_SESSION"], "alpha")
 
-    def test_first_named_local_join_binds_history_before_creating_the_bus(self):
-        profile = mock.Mock()
-        profile.resolve.return_value = {"NW_FLEET_PROFILE_PATH": ""}
-        profile.bind_local_session.side_effect = lambda *_args: self.assertFalse(bus.DB_PATH.exists())
+    def test_named_local_join_never_binds_tmux_history(self):
+        # `orc fleet NAME start` is the only binder; a registration must not
+        # load the fleet resolver or touch tmux.
         with mock.patch.dict(os.environ, {"NW_FLEET": "example"}), \
-                mock.patch.object(bus, "fleet_profile_module", return_value=profile):
+                mock.patch.object(bus, "fleet_profile_module",
+                                  side_effect=AssertionError("join loaded the fleet resolver")):
             self.join("host/worker")
-        profile.bind_local_session.assert_called_once()
         self.assertTrue(bus.DB_PATH.is_file())
-
-    def test_failed_history_binding_does_not_create_registration_state(self):
-        profile = mock.Mock()
-        profile.resolve.return_value = {"NW_FLEET_PROFILE_PATH": ""}
-        profile.bind_local_session.side_effect = RuntimeError("conflicting session identity")
-        with mock.patch.dict(os.environ, {"NW_FLEET": "example"}), \
-                mock.patch.object(bus, "fleet_profile_module", return_value=profile):
-            with self.assertRaisesRegex(RuntimeError, "conflicting session identity"):
-                self.join("host/worker")
-        self.assertFalse(bus.CFG.exists())
 
     def test_missing_local_registry_is_empty_without_creating_directories(self):
         self.assertEqual(bus.room_members(), [])

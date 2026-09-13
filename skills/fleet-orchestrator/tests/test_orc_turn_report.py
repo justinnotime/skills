@@ -14,20 +14,29 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/orc-turn-report.py"
 
 
+def ledger(root):
+    return root / "fleets/alpha/state/fleet-orchestrator/dispatch-ledger.sqlite3"
+
+
+def bus(root):
+    return root / "fleets/alpha/state/agent-bus/agent-bus-v3.sqlite3"
+
+
 @pytest.fixture
 def reporting(tmp_path):
-    database = tmp_path / "bus.sqlite3"
+    # The saved work of fleet "alpha" selects its own registration and task stores.
+    database = bus(tmp_path)
+    database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
         conn.execute("CREATE TABLE identities (agent_id, status, lease_until_ms, host, pane_id)")
         conn.execute("INSERT INTO identities VALUES (?, ?, ?, ?, ?)",
                      ("current", "active", int(time.time() * 1000) + 60000,
                       socket.gethostname(), "%9"))
     config = tmp_path / "runtime.json"
-    value = {"bus": {"database": str(database)},
-             "paths": {"ledger": str(tmp_path / "tasks.sqlite3")}}
-    # No live tmux, inherited selections, credentials, or private config.
+    value = {"fleets": {"runtime_directory": str(tmp_path / "fleets")}}
+    # No live tmux, inherited stores, credentials, or private config.
     env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"],
-           "TMUX_BIN": "/bin/false", "TMUX_PANE": "%9",
+           "TMUX_BIN": "/bin/false", "TMUX_PANE": "%9", "NW_FLEET": "alpha",
            "PYTHONDONTWRITEBYTECODE": "1"}
 
     def run(policy=None, payload=None, **overrides):
@@ -46,7 +55,7 @@ def test_reporting_is_explicit_opt_in(reporting, policy):
     run, root = reporting
     result = run(policy)
     assert result.returncode == 0 and result.stdout == result.stderr == ""
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
 
 
 def test_enabled_records_active_identity_without_saved_enrollment(reporting):
@@ -55,7 +64,7 @@ def test_enabled_records_active_identity_without_saved_enrollment(reporting):
     for event in ("UserPromptSubmit", "Stop"):
         result = run(policy, {"hook_event_name": event})
         assert result.returncode == 0 and result.stdout == result.stderr == ""
-    with sqlite3.connect(root / "tasks.sqlite3") as conn:
+    with sqlite3.connect(ledger(root)) as conn:
         assert conn.execute("SELECT seat, kind, harness, pane, starts, ends FROM seat_presence").fetchall() == [
             ("current", "end", "codex", "9", 1, 1)]
 
@@ -69,9 +78,10 @@ def test_direct_python_hook_uses_default_config_without_environment_prefix(repor
     result = subprocess.run(
         [sys.executable, "-B", str(SCRIPT), "--harness", "codex"],
         input='{"hook_event_name":"Stop"}', text=True, capture_output=True, timeout=10, check=False,
-        env={"HOME": str(root), "PATH": os.environ["PATH"], "TMUX_BIN": "/bin/false", "TMUX_PANE": "%9"})
+        env={"HOME": str(root), "PATH": os.environ["PATH"], "TMUX_BIN": "/bin/false", "TMUX_PANE": "%9",
+             "NW_FLEET": "alpha"})
     assert result.returncode == 0 and result.stdout == result.stderr == ""
-    with sqlite3.connect(root / "tasks.sqlite3") as conn:
+    with sqlite3.connect(ledger(root)) as conn:
         assert conn.execute("SELECT seat, ends FROM seat_presence").fetchall() == [("current", 2)]
 
 
@@ -81,28 +91,30 @@ def test_direct_python_hook_uses_default_config_without_environment_prefix(repor
 ])
 def test_enabled_does_not_record_inactive_or_unknown_explicit_identity(reporting, status, expiry, explicit):
     run, root = reporting
-    with sqlite3.connect(root / "bus.sqlite3") as conn:
+    with sqlite3.connect(bus(root)) as conn:
         conn.execute("UPDATE identities SET status=?, lease_until_ms=?", (status, expiry))
     assert run({"enabled": True}, ORC_SEAT_ID=explicit).returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
 
 
 @pytest.mark.parametrize("state", ["missing", "ambiguous"])
 def test_enabled_requires_an_unambiguous_registration_source(reporting, state):
     run, root = reporting
     if state == "missing":
-        (root / "bus.sqlite3").unlink()
+        (bus(root)).unlink()
     else:
-        with sqlite3.connect(root / "bus.sqlite3") as conn:
+        with sqlite3.connect(bus(root)) as conn:
             conn.execute("INSERT INTO identities SELECT 'duplicate', status, lease_until_ms, host, pane_id FROM identities")
     assert run({"enabled": True}).returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
 
 
-def test_unresolvable_fleet_never_records_in_default_store(reporting):
+def test_unresolvable_fleet_never_records_anywhere(reporting):
     run, root = reporting
     assert run({"enabled": True}, NW_FLEET="missing-fleet").returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
+    assert not (root / "fleets/missing-fleet").exists()
+    assert not list(root.rglob("dispatch-ledger.sqlite3"))
 
 
 @pytest.mark.parametrize("override", [False, True])
@@ -115,12 +127,12 @@ def test_existing_enrollment_and_environment_override_remain_supported(reporting
     if override:
         policy = {"seats_file": str(root / "absent.json")}
     assert run(policy, **env).returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
     seats.write_text('["current"]')
     assert run({**policy, "enabled": False}, **env).returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
     assert run(policy, **env).returncode == 0
-    with sqlite3.connect(root / "tasks.sqlite3") as conn:
+    with sqlite3.connect(ledger(root)) as conn:
         assert conn.execute("SELECT seat, ends FROM seat_presence").fetchall() == [("current", 1)]
 
 
@@ -129,10 +141,10 @@ def test_existing_enrollment_and_environment_override_remain_supported(reporting
 def test_unrelated_or_recursive_native_event_does_not_record(reporting, payload):
     run, root = reporting
     assert run({"enabled": True}, payload).returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()
 
 
 def test_off_override_prevents_reporting(reporting):
     run, root = reporting
     assert run({"enabled": True}, NW_TURN_REPORT_OFF="1").returncode == 0
-    assert not (root / "tasks.sqlite3").exists()
+    assert not (ledger(root)).exists()

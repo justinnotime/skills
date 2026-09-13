@@ -35,10 +35,8 @@ Optional fields:
 | `protected_databases`, `protected_named_database_roots` | Explicit production database identities and named-fleet roots protected from development copies |
 | `paths.orchestrator_state`, `paths.lock_directory`, `paths.lock_prefix` | Runtime observations, snapshots, and default-fleet lock locations; an optional filename prefix preserves an existing lock identity |
 | `paths.legacy_drive_state` | Source directory for an explicit legacy-state import |
-| `fleets.profile_directory`, `fleets.runtime_directory`, `fleets.matrix_config_directory` | Optional explicit profiles and separate session task/message storage roots; ordinary local sessions need no profile |
-| `fleets.default_name` | Optional alias for the existing default fleet; defaults to `default`, without creating a profile or changing storage |
-| `tmux.server_file` | Optional terminal server selector |
-| `tmux.primary_session` | Default fleet's exact primary session name; defaults to `0` |
+| `fleets.profile_directory`, `fleets.runtime_directory`, `fleets.matrix_config_directory` | Optional explicit profiles and the root holding each started fleet's task/message storage; retired fleets move to the sibling `<runtime_directory>-archive` |
+| `tmux.server_file` | Optional selector for the tmux server that hosts fleet sessions |
 | `matrix.homeserver`, `matrix.room`, `matrix.registry_room`, `matrix.token_file` | Required caller-selected Matrix service, distinct rooms, and private authorization-header file |
 | `bus.event_namespace` | Matrix event namespace; preserve it when upgrading an existing transport |
 | `bus.dispatcher_template`, `bus.named_dispatcher_template` | Caller-owned service template for an explicitly requested Matrix dispatcher install |
@@ -47,7 +45,7 @@ Optional fields:
 | `github.owner`, `github.sanctioned_logins_file` | GitHub selection and recognized review authors for already registered tasks |
 | `github.whole_repositories`, `github.mixed_repositories`, `github.path_substrings` | Review-inspection scope |
 | `github.automatic_review_markers` | Comments excluded from substantive review evidence |
-| `watched_repositories` | List of objects containing `path`, `kind` (`checkout` or `bare-hub`), and optional `exempt` paths |
+| `watched_repositories` | Machine-level checkout patrol: objects with `path`, `kind` (`checkout` or `bare-hub`) and optional `exempt` prefixes; results go to the tick log and `checkout-patrol.json`, never to fleet tasks |
 | `watcher_exceptions_file`, `bus.watcher_exceptions` | Caller-approved watcher exceptions for task and transport inspection |
 | `turn_report.enabled` | `true` reports the caller's active registration in the selected fleet without an enrollment list; `false` disables reporting; omitted retains explicit list enrollment |
 | `turn_report.seats_file` | JSON array of enrolled identity IDs, used only when `turn_report.enabled` is omitted; no file means no reporting |
@@ -78,20 +76,24 @@ PRs must be registered explicitly in their owning fleet. The former
 are unused and can be removed. Merge authority and the read-only review
 inspection scope do not create tasks.
 
-The default alias uses the same name syntax as named fleets and cannot collide
-with a named profile. Both `--fleet default` and `--fleet <default_name>` select
-the original default configuration, including when leaving an inherited named
-fleet environment. Do not create another named profile to label an existing
-default fleet: a named profile selects separate databases and transport state.
-Terminal selection uses the configured default server selector, or the explicit
-tmux socket name `default` when no selector exists. `NW_DEFAULT_TMUX_SERVER`
-can select that server independently of a named fleet's environment.
+There is no default fleet. Configuring `fleets.runtime_directory` selects
+fleet mode: every fleet is either a session started with `orc fleet NAME start`
+or an explicit profile, a command without a fleet selection outside tmux is
+refused, and a plain tmux session is not a fleet. Without that setting the
+package runs as one standalone store, the mode a copied package has out of the
+box: its state lives under the XDG state directory or the configured
+`paths.ledger` and `bus.database`, `orc admin tick` schedules that store, and
+no command needs a fleet. An explicit `DISPATCH_LEDGER_DB` or `AGENT_BUS_DB`
+also selects a standalone store. Fleet sessions live on the tmux server named
+by `tmux.server_file`, or the tmux socket name `default` when no selector
+exists. `NW_DEFAULT_TMUX_SERVER` can select that server independently of a
+named fleet's environment.
 
 Selecting `AGENT_BUS_CFG` or `MATRIX_BUS_CFG` also selects that directory's
 `agent-bus-v3.sqlite3` and `auth.hdr`; an explicit `AGENT_BUS_DB` still takes
-precedence. This keeps named-fleet credentials and state separate from default
-configuration. Named-fleet locks live in `cache/locks` under the selected
-fleet runtime, without the default fleet's optional lock prefix.
+precedence. This keeps each fleet's credentials and state separate from the
+machine-level configuration. Fleet locks live in `cache/locks` under the
+selected fleet runtime, without the machine-level optional lock prefix.
 
 For a handoff publisher, ORC supplies `ORC_HANDOFF_SRC`, `ORC_HANDOFF_DST`
 (a basename), `ORC_HANDOFF_DIRECTORY`, `ORC_HANDOFF_SUBJECT`, and
@@ -100,9 +102,9 @@ identity. Without it, ORC writes an atomic local handoff. An external publisher
 is only needed when the caller requires publication beyond local storage.
 Automatic local fleets store handoffs under their own runtime's
 `state/fleet-orchestrator/handoffs`; they do not inherit `handoff.directory` or
-`handoff.publish_command` from the default configuration. Topology and onboarding
-read that same fleet-local directory. The default fleet and explicitly configured
-legacy fleets retain their configured handoff directory and publisher.
+`handoff.publish_command` from the machine-level configuration. Topology and
+onboarding read that same fleet-local directory. Explicitly configured legacy
+fleets retain their configured handoff directory and publisher.
 
 A runtime configuration can name privileged commands and real identities.
 Keep it private and owner-writable, review changes, and do not import an

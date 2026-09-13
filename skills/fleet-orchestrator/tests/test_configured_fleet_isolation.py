@@ -1,4 +1,4 @@
-"""Selected fleet storage and credentials override default-fleet configuration."""
+"""Selected fleet storage and credentials override the adapter's configured fallbacks."""
 import importlib.util
 import json
 import os
@@ -60,7 +60,7 @@ def test_explicit_database_takes_precedence_over_selected_directory(tmp_path):
         assert load_bus().DB_PATH == database
 
 
-def test_default_fleet_uses_its_explicit_database_auth_and_lock_prefix(tmp_path):
+def test_unselected_adapter_uses_the_configured_database_auth_and_lock_prefix(tmp_path):
     with patch.dict(os.environ, settings(tmp_path), clear=True):
         bus = load_bus()
         assert bus.DB_PATH == tmp_path / "default-inbox.sqlite3"
@@ -68,7 +68,7 @@ def test_default_fleet_uses_its_explicit_database_auth_and_lock_prefix(tmp_path)
         assert nw_paths.lock_path("worker") == tmp_path / "default-locks/old-worker.lock"
 
 
-def test_named_fleet_lock_ignores_default_fleet_lock_directory(tmp_path):
+def test_selected_fleet_lock_ignores_the_configured_lock_directory(tmp_path):
     selected = tmp_path / "named-state"
     with patch.dict(os.environ, {**settings(tmp_path), "NW_FLEET_PROFILE_APPLIED": "sample",
                                  "NOTES_RUNTIME_DIR": str(selected)}, clear=True):

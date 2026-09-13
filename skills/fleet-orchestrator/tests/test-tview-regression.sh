@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-mkdir -p "$TMP/home" "$TMP/fleets"
+mkdir -p "$TMP/home" "$TMP/fleets" "$TMP/runtime/0" "$TMP/runtime/tview-primary"
 printf '%s\n' '{"schema":"fleet-runtime/v1"}' > "$TMP/config.json"
 
 NOW=$(date +%s)
@@ -52,18 +52,21 @@ esac
 EOF
 chmod +x "$TMP/tmux"
 
-run_tview() {
+run_tview() {  # $1 = fleet (saved work exists under $TMP/runtime), rest = env prefix
+  local fleet=$1
+  shift
   : > "$TMP/calls.log"
   HOME="$TMP/home" FLEET_ORCHESTRATOR_CONFIG="$TMP/config.json" \
     NW_DEFAULT_TMUX_SERVER=test-default NW_FLEET_PROFILE_DIR="$TMP/fleets" \
+    NW_FLEET_RUNTIME_ROOT="$TMP/runtime" \
     NW_TMUX_SERVER= NW_FLEET_PROFILE_APPLIED= \
     TMUX_BIN="$TMP/tmux" TMUX_STUB_LOG="$TMP/calls.log" \
-    TMUX_STUB_SESSIONS="$TMP/sessions.txt" TMUX= NW_FLEET= \
+    TMUX_STUB_SESSIONS="$TMP/sessions.txt" TMUX= NW_FLEET="$fleet" \
     "$@" bash "$ROOT/scripts/tview" </dev/null >/dev/null 2>&1 || true
 }
 
-# scenario 1: default run reaps EXACTLY the detached idle tview view
-run_tview env
+# scenario 1: an ordinary run reaps EXACTLY the detached idle tview view
+run_tview 0 env
 kills=$(grep -c '^kill-session' "$TMP/calls.log" || true)
 [ "$kills" = "1" ] || fail "expected exactly 1 kill, got $kills"
 grep -q '^kill-session -t =tview-user-old$' "$TMP/calls.log" \
@@ -76,26 +79,23 @@ grep -q 'kill-session -t =tview-user-fresh' "$TMP/calls.log" \
   && fail "a fresh detached view must not be killed"
 
 # scenario 2: the kill switch disables the pass entirely
-run_tview env TVIEW_REAP=off
+run_tview 0 env TVIEW_REAP=off
 grep -q '^kill-session' "$TMP/calls.log" \
   && fail "TVIEW_REAP=off must reap nothing"
 
 # scenario 3: missing activity field never reaps (unknown is not idle)
 printf '%s\n' "tview-user-noact|0|" > "$TMP/sessions.txt"
-run_tview env
+run_tview 0 env
 grep -q '^kill-session' "$TMP/calls.log" \
   && fail "a view with unknown activity must not be reaped"
 
-# scenario 4: a configured primary may itself use the tview-* namespace.
+# scenario 4: a fleet's primary session may itself use the tview-* namespace.
 # Its exact identity must protect it even when detached and ancient.
-printf '%s\n' \
-  '{"schema":"fleet-runtime/v1","tmux":{"primary_session":"tview-primary"}}' \
-  > "$TMP/config.json"
 cat > "$TMP/sessions.txt" <<EOF
 tview-primary|0|$OLD
 tview-user-old|0|$OLD
 EOF
-run_tview env
+run_tview tview-primary env
 grep -q '^kill-session -t =tview-primary$' "$TMP/calls.log" \
   && fail "the configured tview-* primary must never be reaped"
 grep -q '^kill-session -t =tview-user-old$' "$TMP/calls.log" \
@@ -103,7 +103,7 @@ grep -q '^kill-session -t =tview-user-old$' "$TMP/calls.log" \
 
 # scenario 5: another group's only surviving view is never this entry's cleanup.
 printf '%s\n' "tview-unrelated-orphan|0|$OLD|other-group" >> "$TMP/sessions.txt"
-run_tview env
+run_tview tview-primary env
 grep -q '^kill-session -t =tview-unrelated-orphan$' "$TMP/calls.log" \
   && fail "another group's only surviving view must never be reaped"
 

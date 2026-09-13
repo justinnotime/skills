@@ -30,18 +30,18 @@ Usage: tview [WINDOW]
 
 Examples: tview -t work; tview -t work:3; tview -t work:editor; tview 3
 Like tmux attach -t, -t uses SESSION:WINDOW. Use -t :3 for window 3 in
-the current/default fleet. A session name or configured fleet alias is accepted.
+the current fleet. The session name is the fleet name.
 
 Attach through a persistent grouped view dedicated to this terminal. The view
 shares windows/processes with the primary session but keeps an independent
 current window. One positional argument always selects a window by index or
 exact name. --list shows live fleets and saved work, their primary sessions and current
-availability without starting a server or creating a session. --fleet default
-or its configured alias selects the default fleet explicitly.
+availability without starting a server or creating a session. Only fleets
+started with 'orc fleet NAME start' and explicit profiles are listed.
 
 Inside tmux, an unselected fleet is identified by the actual socket and session
-group. Outside tmux, NW_FLEET selects a fleet when set; otherwise the default
-fleet is used. An unrecognized tmux session requires an explicit --fleet.
+group. Outside tmux, NW_FLEET selects a fleet when set; otherwise select
+--fleet NAME. A plain tmux session is not a fleet and cannot be entered.
 Inherited TMUX/TMUX_PANE count as inside tmux only while the server that set
 them still owns that pane; a stale pair, such as one passed down by a daemon
 started in a pane, is ignored and the terminal is treated as outside tmux.
@@ -267,12 +267,13 @@ if [[ -n ${TMUX:-} ]]; then
   fi
 fi
 [[ "$tty_name" != "not a tty" && -n "$tty_name" ]] || tty_name="pid-$$"
-key=$(printf '%s' "$tty_name" | sed 's#^/dev/##; s#[^A-Za-z0-9_.-]#-#g')
-view="tview-${USER:-user}-$key"
-if [[ "$primary" != 0 ]]; then
-  primary_key=$(printf '%s' "${primary_id#\$}" | sed 's#[^A-Za-z0-9_.-]#-#g')
-  view="$view-s$primary_key"
-fi
+# tmux rewrites ':' and '.' inside session names, so every component of the
+# view name is reduced to a safe alphabet first (account names can contain '@'
+# and '.'); otherwise the created view and the attach target would differ.
+key=$(printf '%s' "$tty_name" | sed 's#^/dev/##; s#[^A-Za-z0-9_-]#-#g')
+owner=$(printf '%s' "${USER:-user}" | sed 's#[^A-Za-z0-9_-]#-#g')
+primary_key=$(printf '%s' "${primary_id#\$}" | sed 's#[^A-Za-z0-9_-]#-#g')
+view="tview-$owner-$key-s$primary_key"
 
 if target_tmux has-session -t "=$view" 2>/dev/null; then
   row=$(target_tmux list-sessions -F '#{session_name}|#{session_group}' \

@@ -113,38 +113,18 @@ class MemberSnapshotTests(unittest.TestCase):
         self.assertFalse(retire.called)
         self.assertEqual(conn.execute('SELECT COUNT(*) FROM seat_watch').fetchone()[0], 0)
 
-    def test_first_task_write_binds_local_history_but_readonly_does_not(self):
-        module = mock.Mock()
+    def test_task_writes_never_bind_tmux_history(self):
+        # `orc fleet NAME start` is the only binder; a task write must not
+        # load the fleet resolver or touch tmux, whatever the environment says.
         local = {'NW_FLEET': 'alpha', 'NW_FLEET_PRIMARY_SESSION': 'alpha',
                  'NW_FLEET_PROFILE_PATH': '', 'AGENT_BUS_TRANSPORT': 'local'}
         with mock.patch.dict(os.environ, local), mock.patch.object(
-                wp.importlib.util, 'spec_from_file_location') as spec, mock.patch.object(
-                wp.importlib.util, 'module_from_spec', return_value=module):
+                wp.importlib.util, 'spec_from_file_location',
+                side_effect=AssertionError('a task write loaded the fleet resolver')):
             conn = self.connect([])
-            module.bind_local_session.assert_called_once_with('alpha', os.environ)
             conn.close()
-            module.bind_local_session.reset_mock()
             self.connect([], readonly=True)
-            self.assertFalse(module.bind_local_session.called)
-            self.assertEqual(spec.call_count, 1)
-
-    def test_binding_failure_prevents_task_database_creation(self):
-        with mock.patch.object(wp, '_bind_local_history', side_effect=ValueError('cannot bind history')):
-            with self.assertRaisesRegex(ValueError, 'cannot bind history'):
-                wp.connect_writable()
-        self.assertFalse(self.path.exists())
-
-    def test_nonlocal_and_explicit_profiles_do_not_bind_automatic_history(self):
-        base = {'NW_FLEET': 'alpha', 'NW_FLEET_PRIMARY_SESSION': 'alpha',
-                'NW_FLEET_PROFILE_PATH': '', 'AGENT_BUS_TRANSPORT': 'local'}
-        for change in ({'NW_FLEET': ''}, {'NW_FLEET': 'default'},
-                       {'NW_FLEET_PROFILE_PATH': '/explicit/profile.json'},
-                       {'AGENT_BUS_TRANSPORT': 'matrix'},
-                       {'NW_FLEET_PRIMARY_SESSION': ''}):
-            with self.subTest(change=change), mock.patch.dict(os.environ, {**base, **change}), mock.patch.object(
-                    wp.importlib.util, 'spec_from_file_location') as loader:
-                wp._bind_local_history()
-                self.assertFalse(loader.called)
+        self.assertTrue(self.path.exists())
 
     def test_source_output_empty_is_success_and_malformed_is_unavailable(self):
         for output, expected in [('', []), ('\n ', []),

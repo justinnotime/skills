@@ -213,8 +213,8 @@ KANBAN = {
 
 def orc_command(*args: str, command: str = "orc") -> str:
     """Copyable actions retain their fleet even in another terminal."""
-    fleet = os.environ.get("NW_FLEET") or cfg.get("fleets.default_name", "default")
-    return shlex.join([command, "-t", fleet, *args])
+    fleet = os.environ.get("NW_FLEET", "").strip()
+    return shlex.join([command, *(["-t", fleet] if fleet else []), *args])
 
 
 def orc_task_command(task_id: str, action: str = "show", command: str = "orc") -> str:
@@ -1789,23 +1789,6 @@ def _targets_named_production_db(path: Path) -> bool:
     return False
 
 
-def _bind_local_history() -> None:
-    """First task write fixes the session's history key; queries stay read-only."""
-    name = os.environ.get("NW_FLEET", "")
-    if (not name or name == "default"
-            or os.environ.get("AGENT_BUS_TRANSPORT") != "local"
-            or os.environ.get("NW_FLEET_PROFILE_PATH")
-            or not os.environ.get("NW_FLEET_PRIMARY_SESSION")):
-        return
-    path = SCRIPT_DIR / "lib" / "fleet-profile.py"
-    spec = importlib.util.spec_from_file_location("workplane_fleet_profile", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load fleet profile resolver: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.bind_local_session(name, os.environ)
-
-
 def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
     """A configured installation can write live state; development copies need isolated state."""
 
@@ -1826,8 +1809,6 @@ def connect_writable(*, timeout: float = 15) -> sqlite3.Connection:
             " including a named production file"
         )
 
-
-    _bind_local_history()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=timeout, factory=Connection)
     conn.row_factory = sqlite3.Row

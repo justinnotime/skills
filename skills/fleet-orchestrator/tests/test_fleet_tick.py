@@ -1,4 +1,4 @@
-"""One scheduler discovers current local work without per-fleet jobs."""
+"""One scheduler covers every live fleet; the checkout patrol belongs to the machine."""
 
 import contextlib
 import fcntl
@@ -25,26 +25,13 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(tick)
 
 
-class FleetTickTest(unittest.TestCase):
+class TickFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="fleet-tick-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.config = self.root / "config.json"
-        self.config.write_text(json.dumps({
-            "schema": "fleet-runtime/v1",
-            "runtime_dir": str(self.root / "default"),
-            "paths": {"ledger": str(self.root / "default/tasks.sqlite3")},
-            "bus": {
-                "transport": "local",
-                "config_directory": str(self.root / "default/bus"),
-                "database": str(self.root / "default/bus/inbox.sqlite3"),
-            },
-            "fleets": {
-                "profile_directory": str(self.root / "profiles"),
-                "runtime_directory": str(self.root / "fleets"),
-            },
-        }))
+        self.write_config()
         self.env = {
             "HOME": str(self.root), "PATH": os.environ["PATH"],
             "FLEET_ORCHESTRATOR_CONFIG": str(self.config),
@@ -53,6 +40,18 @@ class FleetTickTest(unittest.TestCase):
         }
         if "TMUX_TMPDIR" in os.environ:
             self.env["TMUX_TMPDIR"] = os.environ["TMUX_TMPDIR"]
+
+    def write_config(self, **extra):
+        self.config.write_text(json.dumps({
+            "schema": "fleet-runtime/v1",
+            "runtime_dir": str(self.root / "machine"),
+            "bus": {"transport": "local"},
+            "fleets": {
+                "profile_directory": str(self.root / "profiles"),
+                "runtime_directory": str(self.root / "fleets"),
+            },
+            **extra,
+        }))
 
     def selection(self, name, *, database=None):
         root = self.root / name
@@ -68,79 +67,107 @@ class FleetTickTest(unittest.TestCase):
             "AGENT_BUS_DB": str(root / "bus/inbox.sqlite3"),
         }
 
-    def test_discovers_once_skips_empty_and_deduplicates_stores(self):
-        database = self.root / "alpha/tasks.sqlite3"
-        database.parent.mkdir()
+    def saved(self, name):
+        database = self.root / name / "tasks.sqlite3"
+        database.parent.mkdir(parents=True, exist_ok=True)
         database.touch()
-        selected = {name: self.selection(name) for name in ("default", "alpha", "empty")}
+        return database
+
+
+class FleetTickTest(TickFixture):
+    def test_discovers_once_skips_empty_and_deduplicates_stores(self):
+        database = self.saved("alpha")
+        selected = {name: self.selection(name) for name in ("alpha", "empty")}
         selected["alias"] = self.selection("alias", database=database)
         selected["legacy"] = {**self.selection("legacy"), "NW_FLEET_PROFILE_PATH": "profile.json"}
         with mock.patch.object(tick.profile, "local_sessions", return_value={
-            "0": "", "alpha": "", "alias": "", "empty": "", "legacy": "",
+            "alpha": "", "alias": "", "empty": "", "legacy": "",
         }) as discover, mock.patch.object(tick, "select_environment", side_effect=lambda name, _: selected[name]), \
-                mock.patch.object(tick.profile, "bind_local_session"), \
+                mock.patch.object(tick.profile, "bind_local_session") as bind, \
                 mock.patch.object(tick, "run_tick", return_value=0) as run, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(tick.run(self.env), 0)
         discover.assert_called_once()
-        self.assertCountEqual([call.args[0]["NW_FLEET"] for call in run.call_args_list], ["default", "alpha"])
+        bind.assert_not_called()
+        # alias and alpha name one store; exactly one of them is scheduled.
+        self.assertEqual(len(run.call_args_list), 1)
+        self.assertIn(run.call_args.args[0]["NW_FLEET"], {"alpha", "alias"})
         self.assertIn("task store already scheduled", output.getvalue())
-        self.assertIn("no saved tasks", output.getvalue())
+        self.assertIn("SKIP fleet empty: no saved tasks", output.getvalue())
         self.assertIn("explicit profile is not automatically scheduled", output.getvalue())
 
     def test_failure_does_not_prevent_other_fleets_and_discards_terminal_context(self):
-        selected = {name: self.selection(name) for name in ("default", "alpha")}
-        path = Path(selected["alpha"]["DISPATCH_LEDGER_DB"])
-        path.parent.mkdir()
-        path.touch()
+        selected = {name: self.selection(name) for name in ("alpha", "beta")}
+        for name in selected:
+            self.saved(name)
         stale = {**self.env, "NW_FLEET": "old", "NW_FLEET_PROFILE_APPLIED": "old",
                  "TMUX": "stale", "TMUX_PANE": "%999", "DISPATCH_LEDGER_DB": "/wrong.sqlite3"}
-        with mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": ""}) as discover, \
+        with mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": "", "beta": ""}) as discover, \
                 mock.patch.object(tick, "select_environment", side_effect=lambda name, _: selected[name]), \
-                mock.patch.object(tick.profile, "bind_local_session"), \
                 mock.patch.object(tick, "run_tick", side_effect=[RuntimeError("test failure"), 0]) as run, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(tick.run(stale), 1)
         self.assertEqual(run.call_count, 2)
         base = discover.call_args.args[0]
-        self.assertNotIn("TMUX", base)
-        self.assertNotIn("TMUX_PANE", base)
-        self.assertNotIn("NW_FLEET", base)
-        self.assertNotIn("DISPATCH_LEDGER_DB", base)
+        for key in ("TMUX", "TMUX_PANE", "NW_FLEET", "NW_FLEET_PROFILE_APPLIED", "DISPATCH_LEDGER_DB"):
+            self.assertNotIn(key, base)
 
-    def test_failed_discovery_still_runs_default(self):
+    def test_failed_discovery_schedules_nothing_and_reports_the_failure(self):
         with mock.patch.object(tick.profile, "local_sessions", side_effect=ValueError("unavailable")), \
                 mock.patch.object(tick, "run_tick", return_value=0) as run, \
-                contextlib.redirect_stdout(io.StringIO()):
+                contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(tick.run(self.env), 1)
-        run.assert_called_once()
+        run.assert_not_called()
+        self.assertIn("FAIL local fleet discovery: unavailable", output.getvalue())
 
-    def test_blocked_default_does_not_delay_local_fleet(self):
-        selected = {name: self.selection(name) for name in ("default", "alpha")}
-        path = Path(selected["alpha"]["DISPATCH_LEDGER_DB"])
-        path.parent.mkdir()
-        path.touch()
-        local_done = threading.Event()
+    def test_without_a_fleet_runtime_the_standalone_store_is_scheduled(self):
+        self.config.write_text(json.dumps({
+            "schema": "fleet-runtime/v1",
+            "runtime_dir": str(self.root / "machine"),
+            "bus": {"transport": "local"},
+        }))
+        with mock.patch.object(tick.profile, "local_sessions",
+                               side_effect=AssertionError("standalone mode must not scan tmux")), \
+                mock.patch.object(tick, "run_tick", return_value=0) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(tick.run(self.env), 0)
+        run.assert_called_once()
+        self.assertNotIn("NW_FLEET", run.call_args.args[0])
+        self.assertIn("RUN standalone store", output.getvalue())
+
+    def test_no_live_fleet_is_a_quiet_success(self):
+        with mock.patch.object(tick.profile, "local_sessions", return_value={}), \
+                mock.patch.object(tick, "run_tick", return_value=0) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(tick.run(self.env), 0)
+        run.assert_not_called()
+        self.assertNotIn("FAIL", output.getvalue())
+
+    def test_a_blocked_fleet_does_not_delay_another(self):
+        selected = {name: self.selection(name) for name in ("alpha", "beta")}
+        for name in selected:
+            self.saved(name)
+        fast_done = threading.Event()
 
         def run_fleet(env, _dry_run):
-            if env["NW_FLEET"] == "default":
-                self.assertTrue(local_done.wait(2), "default blocked an independent local fleet")
+            if env["NW_FLEET"] == "alpha":
+                self.assertTrue(fast_done.wait(2), "a slow fleet blocked an independent fleet")
             else:
-                local_done.set()
+                fast_done.set()
             return 0
 
-        with mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": ""}), \
+        with mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": "", "beta": ""}), \
                 mock.patch.object(tick, "select_environment", side_effect=lambda name, _: selected[name]), \
-                mock.patch.object(tick.profile, "bind_local_session"), \
                 mock.patch.object(tick, "run_tick", side_effect=run_fleet), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(tick.run(self.env), 0)
 
     def test_local_sender_is_idempotent_and_never_messages_an_agent(self):
-        env = self.env
+        (self.root / "fleets/alpha").mkdir(parents=True)  # saved work of a stopped fleet
+        env = tick.profile.command_env("alpha", self.env)
         tick.ensure_local_sender(env)
         tick.ensure_local_sender(env)
-        with sqlite3.connect(self.root / "default/bus/inbox.sqlite3") as conn:
+        with sqlite3.connect(env["AGENT_BUS_DB"]) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM identities").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT harness,mode,pane_id FROM identities").fetchone(),
                              ("cron", "pull", None))
@@ -157,30 +184,20 @@ class FleetTickTest(unittest.TestCase):
         sender.assert_not_called()
         self.assertEqual(child.call_args.args[0][-1], "--dry-run")
 
-    def test_default_scope_uses_the_actual_surviving_default_session(self):
-        with mock.patch.object(tick.profile, "_terminal_target", return_value={
-            "name": "default", "tmux_server": "default", "primary_session": "tview-original",
-        }):
-            selected = tick.select_environment("default", self.env)
-        self.assertEqual(selected["NW_FLEET_PRIMARY_SESSION"], "tview-original")
-        with mock.patch.dict(os.environ, selected, clear=True):
-            import tmux_runtime
-            self.assertEqual(tmux_runtime.pane_scope(), ["-s", "-t", "=tview-original:"])
-
-    def test_dry_preparation_does_not_assign_a_tmux_history_option(self):
+    def test_scheduling_never_assigns_a_tmux_history_option(self):
         selected = self.selection("alpha")
-        database = Path(selected["DISPATCH_LEDGER_DB"])
-        database.parent.mkdir()
-        database.touch()
-        with mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": ""}), \
-                mock.patch.object(tick.profile, "resolve", return_value=selected), \
-                mock.patch.object(tick.profile, "bind_local_session") as bind, \
-                mock.patch.object(tick, "run_tick", return_value=0) as run, \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tick.run(self.env, dry_run=True), 0)
-        bind.assert_not_called()
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0]["NW_FLEET_PRIMARY_SESSION"], "alpha")
+        self.saved("alpha")
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), \
+                    mock.patch.object(tick.profile, "local_sessions", return_value={"alpha": ""}), \
+                    mock.patch.object(tick.profile, "resolve", return_value=selected), \
+                    mock.patch.object(tick.profile, "bind_local_session") as bind, \
+                    mock.patch.object(tick, "run_tick", return_value=0) as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(tick.run(self.env, dry_run=dry_run), 0)
+            bind.assert_not_called()
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0]["NW_FLEET_PRIMARY_SESSION"], "alpha")
 
     def test_multiple_live_sessions_cannot_schedule_one_saved_runtime(self):
         sessions = {
@@ -191,11 +208,121 @@ class FleetTickTest(unittest.TestCase):
                 mock.patch.object(tick, "run_tick", return_value=0) as run, \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(tick.run(self.env), 1)
-        run.assert_called_once()  # Only the compatible default may run.
+        run.assert_not_called()
         self.assertIn("open in multiple sessions", output.getvalue())
 
-    @unittest.skipUnless(shutil.which("tmux"), "tmux is required")
-    def test_real_fanout_keeps_local_work_independent_of_default_lock_and_project_scans(self):
+
+class CheckoutPatrolTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="checkout-patrol-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.config = self.root / "config.json"
+        self.env = {
+            "HOME": str(self.root), "PATH": os.environ["PATH"],
+            "FLEET_ORCHESTRATOR_CONFIG": str(self.config),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "NW_DEFAULT_TMUX_SERVER": "patrol-unused-" + uuid.uuid4().hex[:12],
+        }
+
+    def make_repo(self, name, *, bare=False):
+        path = self.root / name
+        args = ["git", "init", "-q"] + (["--bare"] if bare else []) + [str(path)]
+        subprocess.run(args, check=True, capture_output=True)
+        return path
+
+    def test_dirty_checkout_found_with_mtimes_and_exempts(self):
+        repo = self.make_repo("co")
+        (repo / "junk.log").write_text("x")
+        (repo / "spool").mkdir()
+        (repo / "spool" / "runtime-file").write_text("x")
+        findings = tick.checkout_findings(
+            {"path": str(repo), "kind": "checkout", "exempt": ["spool/"]}, self.env)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("junk.log", findings[0])
+        self.assertIn("T", findings[0])
+
+    def test_in_repo_worktree_dirs_are_flagged_not_excused(self):
+        repo = self.make_repo("co")
+        (repo / ".claude" / "worktrees" / "wt").mkdir(parents=True)
+        (repo / ".claude" / "worktrees" / "wt" / "f").write_text("x")
+        findings = tick.checkout_findings({"path": str(repo), "kind": "checkout"}, self.env)
+        self.assertEqual(len(findings), 1)
+        self.assertIn(".claude/worktrees/wt/f", findings[0])
+
+    def test_clean_is_silent_and_absent_is_reported(self):
+        repo = self.make_repo("co")
+        self.assertEqual(tick.checkout_findings({"path": str(repo), "kind": "checkout"}, self.env), [])
+        self.assertEqual(tick.checkout_findings(
+            {"path": str(self.root / "nope"), "kind": "checkout"}, self.env), ["MISSING CHECKOUT"])
+
+    def test_failed_inspection_is_not_reported_as_clean(self):
+        repo = self.make_repo("co")
+        for kind in ("checkout", "bare-hub"):
+            with self.subTest(kind=kind), mock.patch.object(tick.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
+                findings = tick.checkout_findings({"path": str(repo), "kind": kind}, self.env)
+                self.assertEqual(len(findings), 1)
+                self.assertIn("CHECK FAILED", findings[0])
+        with mock.patch.object(tick.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            self.assertEqual(tick.checkout_findings({"path": str(repo), "kind": "checkout"}, self.env),
+                             ["CHECK FAILED: git inspection unavailable"])
+
+    def test_bare_hub_regression_flagged(self):
+        hub = self.make_repo("hub.git", bare=True)
+        self.assertEqual(tick.checkout_findings({"path": str(hub), "kind": "bare-hub"}, self.env), [])
+        nonbare = self.make_repo("co")
+        self.assertEqual(tick.checkout_findings({"path": str(nonbare), "kind": "bare-hub"}, self.env),
+                         ["NON-BARE"])
+
+    def test_patrol_writes_machine_state_and_never_creates_fleet_work(self):
+        dirty = self.make_repo("dirty")
+        (dirty / "leaked.tmp").write_text("x")
+        clean = self.make_repo("clean")
+        self.config.write_text(json.dumps({
+            "schema": "fleet-runtime/v1",
+            "runtime_dir": str(self.root / "machine"),
+            "fleets": {"runtime_directory": str(self.root / "fleets")},
+            "watched_repositories": [
+                {"path": str(dirty), "kind": "checkout", "exempt": []},
+                {"path": str(clean), "kind": "checkout", "exempt": []},
+            ],
+        }))
+        state = self.root / "machine/state/fleet-orchestrator/checkout-patrol.json"
+        with mock.patch.object(tick.profile, "local_sessions", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(tick.run(self.env, dry_run=True), 0)
+        self.assertIn("WARN checkout patrol", output.getvalue())
+        self.assertIn("leaked.tmp", output.getvalue())
+        self.assertIn("OK checkout patrol: 1 clean, 1 not clean", output.getvalue())
+        self.assertFalse(state.exists(), "a dry run must not write the status file")
+        with mock.patch.object(tick.profile, "local_sessions", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(tick.run(self.env), 0)
+        report = json.loads(state.read_text())
+        self.assertEqual(report["schema"], "checkout-patrol/v1")
+        self.assertEqual(len(report["repositories"][str(dirty)]["findings"]), 1)
+        self.assertEqual(report["repositories"][str(clean)]["findings"], [])
+        self.assertFalse((self.root / "fleets").exists(), "the patrol must not create fleet state")
+        self.assertFalse(list((self.root / "machine").rglob("*.sqlite3")),
+                         "the patrol must not open or create a task store")
+
+    def test_malformed_patrol_entry_fails_loudly(self):
+        self.config.write_text(json.dumps({
+            "schema": "fleet-runtime/v1",
+            "runtime_dir": str(self.root / "machine"),
+            "fleets": {"runtime_directory": str(self.root / "fleets")},
+            "watched_repositories": [{"kind": "checkout"}],
+        }))
+        with mock.patch.object(tick.profile, "local_sessions", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(tick.run(self.env), 1)
+        self.assertIn("FAIL checkout patrol", output.getvalue())
+
+
+@unittest.skipUnless(shutil.which("tmux"), "tmux is required")
+class RealFanoutTest(TickFixture):
+    def test_real_fanout_keeps_fleet_work_independent_and_scans_no_projects(self):
         server = "fleet-tick-" + uuid.uuid4().hex[:12]
         self.env["NW_DEFAULT_TMUX_SERVER"] = server
 
@@ -207,31 +334,34 @@ class FleetTickTest(unittest.TestCase):
             return result
 
         self.addCleanup(lambda: command("tmux", "-L", server, "kill-server", check=False))
-        command("tmux", "-L", server, "new-session", "-d", "-s", "alpha", "sleep 300")
-        command("tmux", "-L", server, "new-session", "-d", "-s", "empty", "sleep 300")
-        for selection in (["--fleet", "default"], ["--fleet", "alpha"]):
-            command(ROOT / "scripts/orc", *selection, "open", "--to", "operator",
+        for name in ("alpha", "beta", "empty"):
+            command(ROOT / "scripts/orc", "fleet", name, "start")
+        command("tmux", "-L", server, "new-session", "-d", "-s", "plain", "sleep 300")
+        for name in ("alpha", "beta"):
+            command(ROOT / "scripts/orc", "--fleet", name, "open", "--to", "operator",
                     "--subject", "synthetic work", "--body", "test", "--no-check")
-        default_lock = self.root / "default/locks/fleet-orchestrator.lock"
-        default_lock.parent.mkdir(parents=True)
-        config = json.loads(self.config.read_text())
-        config["github"] = {"owner": "example"}
-        config["authority"] = {"merge_keys": {"unrelated-project": "operator"}}
-        self.config.write_text(json.dumps(config))
+        beta_lock = self.root / "fleets/beta/cache/locks/fleet-orchestrator.lock"
+        beta_lock.parent.mkdir(parents=True, exist_ok=True)
+        self.write_config(github={"owner": "example"},
+                          authority={"merge_keys": {"unrelated-project": "operator"}})
         fake_gh = self.root / "gh"
         gh_log = self.root / "gh-called"
         fake_gh.write_text(f"#!/bin/sh\ntouch '{gh_log}'\nprintf '[]\\n'\n")
         fake_gh.chmod(0o755)
         self.env["NW_GH_CLI"] = str(fake_gh)
-        with default_lock.open("w") as held:
+        with beta_lock.open("w") as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = command(sys.executable, ROOT / "scripts/fleet-tick.py")
-        self.assertIn("another fleet-orchestrator tick holds the lock", result.stdout)
         self.assertIn("RUN fleet alpha", result.stdout)
+        self.assertIn("RUN fleet beta", result.stdout)
+        self.assertIn("[beta] SKIP another fleet-orchestrator tick holds the lock", result.stdout)
         self.assertIn("SKIP fleet empty: no saved tasks", result.stdout)
+        self.assertNotIn("plain", result.stdout)
         self.assertTrue((self.root / "fleets/alpha/state/fleet-orchestrator/tick-last.json").is_file())
+        self.assertFalse((self.root / "fleets/beta/state/fleet-orchestrator/tick-last.json").exists())
         self.assertFalse((self.root / "fleets/empty/state/fleet-orchestrator/dispatch-ledger.sqlite3").exists())
-        self.assertFalse(gh_log.exists(), "a local fleet scanned the default fleet's projects")
+        self.assertFalse((self.root / "fleets/plain").exists())
+        self.assertFalse(gh_log.exists(), "a fleet scanned projects it never registered")
         self.assertFalse((self.root / "profiles").exists())
 
 

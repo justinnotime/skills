@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Run the existing scheduler for the default and live local fleets.
+"""Run the scheduler for every live fleet, then the machine-level checkout patrol.
 
-Discovery is a tmux observation, not a second fleet registry. Each child keeps
-the task engine's existing per-store lock; stopped local fleets retain history
-without being scheduled. This command makes zero model calls.
+Discovery is a tmux observation, not a second fleet registry: a fleet is a
+session group that `orc fleet NAME start` bound to saved work. Each child keeps
+the task engine's existing per-store lock; stopped fleets retain history without
+being scheduled. The checkout patrol belongs to the machine, not to a fleet: it
+writes a status file and log lines, never fleet tasks. Zero model calls.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -34,38 +38,37 @@ def log(message: str) -> None:
 
 def scheduler_environment(env: Mapping[str, str]) -> dict[str, str]:
     """The scheduler is headless; terminal selection cannot redirect its work."""
-    selected = profile._default_environment(env)
+    selected = profile._base_environment(env)
     for key in ("TMUX", "TMUX_PANE", "ORC_SEAT_ID", "AGENT_BUS_SLOT"):
         selected.pop(key, None)
     selected["PYTHONDONTWRITEBYTECODE"] = "1"
     return selected
 
 
+def machine_runtime(env: Mapping[str, str]) -> Path:
+    if env.get("NOTES_RUNTIME_DIR"):
+        return Path(cfg.expand(env["NOTES_RUNTIME_DIR"], env))
+    return cfg.path(
+        "runtime_dir", Path(env.get("XDG_STATE_HOME", str(cfg.home(env) / ".local/state")))
+        / "fleet-orchestrator", env=env)
+
+
+def machine_state_dir(env: Mapping[str, str]) -> Path:
+    return cfg.path("paths.orchestrator_state",
+                    machine_runtime(env) / "state/fleet-orchestrator", env=env)
+
+
 def ledger_path(env: Mapping[str, str]) -> Path:
     explicit = env.get("DISPATCH_LEDGER_DB")
     if explicit:
         return Path(cfg.expand(explicit, env)).resolve()
-    runtime = (Path(cfg.expand(env["NOTES_RUNTIME_DIR"], env)) if env.get("NOTES_RUNTIME_DIR")
-               else cfg.path(
-                   "runtime_dir", Path(env.get("XDG_STATE_HOME", str(cfg.home(env) / ".local/state")))
-                   / "fleet-orchestrator", env=env))
-    state = cfg.path("paths.orchestrator_state", runtime / "state/fleet-orchestrator", env=env)
-    return cfg.path("paths.ledger", state / "dispatch-ledger.sqlite3", env=env).resolve()
+    return cfg.path("paths.ledger", machine_state_dir(env) / "dispatch-ledger.sqlite3",
+                    env=env).resolve()
 
 
 def select_environment(name: str, base: Mapping[str, str]) -> dict[str, str]:
     """Read a complete store and pane scope without assigning tmux options."""
-    if profile._canonical_name(name, base) == "default":
-        selected = profile.command_env("default", base)
-        target = profile._terminal_target("default", base)
-        selected["NW_FLEET_PRIMARY_SESSION"] = target["primary_session"]
-        return selected
-    selected = dict(base)
-    resolved = profile.resolve(name, base)
-    for key in profile.PROFILE_ENV_KEYS:
-        selected.pop(key, None)
-    selected.update(resolved)
-    return selected
+    return profile.command_env(name, base)
 
 
 def ensure_local_sender(env: Mapping[str, str]) -> None:
@@ -114,7 +117,7 @@ def run_tick(env: Mapping[str, str], dry_run: bool) -> int:
     if dry_run:
         command.append("--dry-run")
     result = subprocess.run(command, env=dict(env), text=True, capture_output=True, check=False)
-    name = env.get("NW_FLEET") or "default"
+    name = env.get("NW_FLEET") or "standalone"
     for line in (result.stdout or "").splitlines():
         log(f"[{name}] {line}")
     for line in (result.stderr or "").splitlines():
@@ -122,17 +125,96 @@ def run_tick(env: Mapping[str, str], dry_run: bool) -> int:
     return result.returncode
 
 
+def checkout_findings(repo: Mapping[str, object], env: Mapping[str, str] | None = None) -> list[str]:
+    """Paths that make a watched checkout unclean, each with its modification time."""
+    root = Path(cfg.expand(str(repo["path"]), env or os.environ))
+    if not root.exists():
+        return ["MISSING CHECKOUT"]
+    try:
+        if repo.get("kind") == "bare-hub":
+            out = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-bare-repository"],
+                                 text=True, capture_output=True, timeout=15)
+            if out.returncode == 0 and out.stdout.strip() == "false":
+                return ["NON-BARE"]
+            if out.returncode:
+                return [f"CHECK FAILED: git rev-parse exited {out.returncode}"]
+            return []
+        out = subprocess.run(["git", "-C", str(root), "status", "--porcelain",
+                              "--ignored=no", "--untracked-files=all"],
+                             text=True, capture_output=True, timeout=30)
+        if out.returncode != 0:
+            return [f"CHECK FAILED: git status exited {out.returncode}"]
+    except (OSError, subprocess.TimeoutExpired):
+        return ["CHECK FAILED: git inspection unavailable"]
+    exempt = tuple(str(prefix) for prefix in (repo.get("exempt") or ()))
+    findings = []
+    for line in out.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        rel = line[3:].split(" -> ")[-1].strip().strip('"')
+        if any(rel.startswith(prefix) for prefix in exempt):
+            continue
+        try:
+            mtime = datetime.fromtimestamp((root / rel).stat().st_mtime, timezone.utc) \
+                .isoformat(timespec="seconds")
+        except OSError:
+            mtime = "(gone)"
+        findings.append(f"{line[:2]} {rel}\t{mtime}")
+    return findings
+
+
+def checkout_patrol(base: Mapping[str, str], dry_run: bool) -> int:
+    """Machine-level check of the configured checkouts: a status file and log lines."""
+    repositories = cfg.get("watched_repositories", [], env=base)
+    if not repositories:
+        return 0
+    report: dict[str, dict[str, object]] = {}
+    dirty = 0
+    for repo in repositories:
+        if not isinstance(repo, dict) or not repo.get("path"):
+            log("FAIL checkout patrol: a watched_repositories entry has no path")
+            return 1
+        findings = checkout_findings(repo, base)
+        report[str(repo["path"])] = {"kind": repo.get("kind", "checkout"), "findings": findings}
+        if findings:
+            dirty += 1
+            shown = "; ".join(item.split("\t")[0] for item in findings[:5])
+            more = " ..." if len(findings) > 5 else ""
+            log(f"WARN checkout patrol: {repo['path']} is not clean"
+                f" ({len(findings)} finding(s)): {shown}{more}")
+    log(f"OK checkout patrol: {len(repositories) - dirty} clean, {dirty} not clean")
+    if not dry_run:
+        state = machine_state_dir(base)
+        state.mkdir(parents=True, exist_ok=True)
+        path = state / "checkout-patrol.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({
+            "schema": "checkout-patrol/v1",
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "repositories": report,
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    return 0
+
+
 def run(env: Mapping[str, str], *, dry_run: bool = False) -> int:
     base = scheduler_environment(env)
     failures = 0
-    names = ["default"]
+    if not profile.fleet_mode(base):
+        # No fleet runtime is configured: one standalone store, scheduled as itself.
+        log(f"{'DRY' if dry_run else 'RUN'} standalone store")
+        try:
+            failures += int(bool(run_tick(base, dry_run)))
+        except (ValueError, OSError, sqlite3.Error, RuntimeError,
+                subprocess.TimeoutExpired) as exc:
+            log(f"FAIL standalone store: {exc}")
+            failures += 1
+        failures += checkout_patrol(base, dry_run)
+        return int(bool(failures))
+    names: list[str] = []
     try:
-        default_alias = profile.default_name(base)
-        primary = cfg.get("tmux.primary_session", "0", env=base)
-        names.extend(name for name in profile.local_sessions(base)
-                     if name not in {"default", default_alias, primary})
+        names = sorted(profile.local_sessions(base))
     except (ValueError, OSError) as exc:
-        # The configured default still runs when native tmux discovery fails.
         log(f"FAIL local fleet discovery: {exc}")
         failures += 1
 
@@ -141,23 +223,16 @@ def run(env: Mapping[str, str], *, dry_run: bool = False) -> int:
     for name in names:
         try:
             selected = select_environment(name, base)
+            if selected.get("NW_FLEET_PROFILE_PATH"):
+                # Explicit profiles keep their configured scheduler.
+                log(f"SKIP fleet {name}: explicit profile is not automatically scheduled")
+                continue
             database = ledger_path(selected)
             if database in seen:
                 log(f"SKIP fleet {name}: task store already scheduled")
                 continue
-            if name != "default":
-                # Explicit legacy profiles keep their configured scheduler.
-                # Discovery never adds another scheduler for those profiles.
-                if selected.get("NW_FLEET_PROFILE_PATH"):
-                    log(f"SKIP fleet {name}: explicit profile is not automatically scheduled")
-                    continue
-                if not database.is_file():
-                    log(f"SKIP fleet {name}: no saved tasks")
-                    continue
-                if not dry_run:
-                    profile.bind_local_session(name, base)
-            elif dry_run and not database.is_file():
-                log("SKIP default fleet: no saved tasks to inspect")
+            if not database.is_file():
+                log(f"SKIP fleet {name}: no saved tasks")
                 continue
             seen.add(database)
             pending.append((name, selected))
@@ -183,6 +258,7 @@ def run(env: Mapping[str, str], *, dry_run: bool = False) -> int:
                     subprocess.TimeoutExpired) as exc:
                 log(f"FAIL fleet {name}: {exc}")
                 failures += 1
+    failures += checkout_patrol(base, dry_run)
     return int(bool(failures))
 
 
