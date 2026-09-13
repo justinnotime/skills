@@ -3084,13 +3084,15 @@ def checkout_findings(repo: dict) -> list[str]:
     from datetime import datetime, timezone as tz
     root = Path(cfg.expand(repo["path"]))
     if not root.exists():
-        return []
+        return ["MISSING CHECKOUT"]
     try:
         if repo["kind"] == "bare-hub":
             out = sp.run(["git", "-C", str(root), "rev-parse", "--is-bare-repository"],
                          text=True, capture_output=True, timeout=15)
             if out.returncode == 0 and out.stdout.strip() == "false":
                 return ["NON-BARE"]
+            if out.returncode:
+                return [f"CHECK FAILED: git rev-parse exited {out.returncode}"]
             return []
 
 
@@ -3098,9 +3100,9 @@ def checkout_findings(repo: dict) -> list[str]:
                       "--ignored=no", "--untracked-files=all"],
                      text=True, capture_output=True, timeout=30)
         if out.returncode != 0:
-            return []
+            return [f"CHECK FAILED: git status exited {out.returncode}"]
     except (OSError, sp.TimeoutExpired):
-        return []
+        return ["CHECK FAILED: git inspection unavailable"]
     findings = []
     for line in out.stdout.splitlines():
         if len(line) < 4:
@@ -3117,23 +3119,42 @@ def checkout_findings(repo: dict) -> list[str]:
     return findings
 
 
+def retire_checkout_messages(conn, path: str) -> None:
+    conn.execute(
+        "UPDATE task_msg SET send_state='superseded-before-contact',"
+        " processed='superseded-before-contact',"
+        " last_error='checkout alert no longer requires message delivery'"
+        " WHERE task_id='hygiene' AND purpose='checkout-dirty'"
+        " AND instr(dedup_key, ?)=1"
+        " AND send_state IN ('recorded','failed')",
+        (f"hygiene:{path}:",),
+    )
+
+
 def tick_checkout_hygiene(conn, dry: bool) -> None:
     import hashlib as hl
     for repo in WATCHED_CHECKOUTS:
         findings = checkout_findings(repo)
+        operator_link = f"checkout-hygiene:{repo['path']}"
+        operator_task = conn.execute(
+            "SELECT * FROM dispatch WHERE links=? AND recipient='operator'"
+            " AND workflow='dispatch' AND no_chase=1 AND state IN ('open','acked')"
+            " ORDER BY created_ms DESC LIMIT 1", (operator_link,),
+        ).fetchone()
         if not findings:
             if not dry:
                 # Drop obsolete delivery work, retaining the sampled evidence.
                 with conn:
-                    conn.execute(
-                        "UPDATE task_msg SET send_state='superseded-before-contact',"
-                        " processed='superseded-before-contact',"
-                        " last_error='checkout alert no longer matches inspection'"
-                        " WHERE task_id='hygiene' AND purpose='checkout-dirty'"
-                        " AND instr(dedup_key, ?)=1"
-                        " AND send_state IN ('recorded','failed')",
-                        (f"hygiene:{repo['path']}:",),
-                    )
+                    retire_checkout_messages(conn, repo['path'])
+                    if operator_task is not None:
+                        conn.execute(
+                            "UPDATE dispatch SET state=?, resolution='done',"
+                            " ask_flag=0,last_event=? WHERE id=?",
+                            (wp.step_row(operator_task, "close"), wp.now(), operator_task['id']),
+                        )
+                        wp.record(conn, operator_task['id'], "close:done",
+                                  f"Scheduled checkout inspection found no changes: {repo['path']}")
+                        wp.claim_settle_terminal(conn, operator_task['id'], "done")
             continue
         digest = hl.sha1("\n".join(sorted(findings)).encode()).hexdigest()[:12]
         day = wp.now() // 86400
@@ -3150,6 +3171,24 @@ def tick_checkout_hygiene(conn, dry: bool) -> None:
                 + "\n".join(shown) + more
                 + "\n\nExempt prefixes honored. One alert per path-set"
                 f" per day; changes to the set re-alert.")
+        if operator_task is not None or not wp.role_holders(conn, "commander"):
+            body += ("\n\nInspect and resolve these local changes. This item is"
+                     " checked by the existing checkout patrol, which closes it"
+                     " after a clean inspection; it needs no separate check command.")
+            with conn:
+                retire_checkout_messages(conn, repo['path'])
+                if operator_task is None:
+                    wp.insert_task(
+                        conn, recipient="operator", no_chase=1, repo=repo['path'],
+                        subject=f"shared checkout dirty: {repo['path']}"[:160],
+                        body=body, links=operator_link,
+                    )
+                    log(f"OK hygiene recorded in operator queue: {repo['path']}")
+                elif operator_task['body'] != body:
+                    conn.execute("UPDATE dispatch SET body=?,last_event=? WHERE id=?",
+                                 (body, wp.now(), operator_task['id']))
+                    wp.record(conn, operator_task['id'], "auto-note", body)
+            continue
         with conn:
             row_id = wp.record_msg(conn, "hygiene", "checkout-dirty", dedup,
                                    commander,

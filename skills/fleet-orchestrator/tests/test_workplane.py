@@ -4449,14 +4449,29 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn(".claude/worktrees/wt/f", findings[0])
 
-    def test_clean_and_absent_are_silent(self):
+    def test_clean_is_silent_and_absent_is_reported(self):
         orc = self.load_orc()
         repo = self.make_repo(self.tmp.name)
         self.assertEqual(orc.checkout_findings(
             {"path": str(repo), "kind": "checkout", "exempt": ()}), [])
         self.assertEqual(orc.checkout_findings(
             {"path": str(Path(self.tmp.name) / "nope"), "kind": "checkout",
-             "exempt": ()}), [])
+             "exempt": ()}), ["MISSING CHECKOUT"])
+
+    def test_failed_inspection_is_not_reported_as_clean(self):
+        orc = self.load_orc()
+        repo = self.make_repo(self.tmp.name)
+        for kind in ("checkout", "bare-hub"):
+            with self.subTest(kind=kind), mock.patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
+                findings = orc.checkout_findings(
+                    {"path": str(repo), "kind": kind, "exempt": ()})
+                self.assertEqual(len(findings), 1)
+                self.assertIn("CHECK FAILED", findings[0])
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            self.assertEqual(orc.checkout_findings(
+                {"path": str(repo), "kind": "checkout", "exempt": ()}),
+                ["CHECK FAILED: git inspection unavailable"])
 
     def test_bare_hub_regression_flagged(self):
         orc = self.load_orc()
@@ -4485,40 +4500,42 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
 
-    def test_empty_commander_cache_records_hygiene_without_replaying_old_state(self):
+    def test_unheld_checkout_recipient_uses_operator_queue_and_closes_when_clean(self):
         conn = wp.connect_writable()
         orc = self.load_orc()
-        with conn:
-            conn.execute(
-                "INSERT INTO seat (agent_id,handle,status,addressable,"
-                " refreshed_ms) VALUES"
-                " ('departed-command','example-host/fleet-command-old',"
-                " 'active',1,1)"
-            )
-        repo = {"path": "/shared/main", "kind": "checkout", "exempt": ()}
+        path = self.make_repo(self.tmp.name)
+        dirt = path / "unexpected.tmp"
+        dirt.write_text("unexpected file")
+        repo = {"path": str(path), "kind": "checkout", "exempt": ()}
         with mock.patch.object(orc, "WATCHED_CHECKOUTS", [repo]), \
-                mock.patch.object(orc, "checkout_findings",
-                                  return_value=["?? leaked.tmp\t2026-08-26"]):
-            orc.tick_checkout_hygiene(conn, dry=False)
-        msg = conn.execute(
-            "SELECT target,send_state,last_error FROM task_msg"
-            " WHERE purpose='checkout-dirty'",
-        ).fetchone()
-        self.assertEqual(msg["target"], "role:commander")
-        self.assertEqual(msg["send_state"], "recorded")
-        self.assertIn("unheld role", msg["last_error"])
-        with mock.patch.object(wp, "bus_send", return_value=False) as send:
-            self.assertEqual(wp.retry_unsent(conn, log=lambda _: None), (0, 1))
-        send.assert_called_once()
-        with mock.patch.object(orc, "WATCHED_CHECKOUTS", [repo]), \
-                mock.patch.object(orc, "checkout_findings", return_value=[]), \
                 mock.patch.object(wp, "bus_send") as send:
             orc.tick_checkout_hygiene(conn, dry=True)
-            self.assertEqual(conn.execute(
-                "SELECT send_state FROM task_msg WHERE purpose='checkout-dirty'"
-            ).fetchone()[0], "recorded")
+            self.assertEqual(conn.execute("SELECT count(*) FROM dispatch").fetchone()[0], 0)
             orc.tick_checkout_hygiene(conn, dry=False)
-            self.assertEqual(wp.retry_unsent(conn), (0, 0))
+            orc.tick_checkout_hygiene(conn, dry=False)
+            rows = conn.execute("SELECT * FROM dispatch").fetchall()
+            self.assertEqual(len(rows), 1)
+            task = rows[0]
+            self.assertEqual(task["recipient"], "operator")
+            self.assertTrue(wp.waits_on_operator(conn, task))
+            self.assertIn("unexpected.tmp", task["body"])
+            self.assertEqual(conn.execute("SELECT count(*) FROM task_msg").fetchone()[0], 0)
+            with mock.patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
+                orc.tick_checkout_hygiene(conn, dry=False)
+            self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")
+            self.assertIn("CHECK FAILED", wp.fetch(conn, task["id"])["body"])
+            dirt.unlink()
+            orc.tick_checkout_hygiene(conn, dry=True)
+            self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")
+            orc.tick_checkout_hygiene(conn, dry=False)
+            self.assertEqual(wp.fetch(conn, task["id"])["state"], "closed")
+            self.assertEqual(wp.fetch(conn, task["id"])["resolution"], "done")
+            dirt.write_text("recurring dirt")
+            orc.tick_checkout_hygiene(conn, dry=False)
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM dispatch WHERE state!='closed'"
+            ).fetchone()[0], 1)
         send.assert_not_called()
 
     def test_empty_commander_keeps_escalation_on_the_original_task(self):

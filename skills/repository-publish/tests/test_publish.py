@@ -283,14 +283,65 @@ def test_message_policy_refreshes_after_rebase(project):
         " for args in [['add','.'],['commit','-m','policy'],['push','origin','main']]:\n"
         "  subprocess.run(['git','-C',str(other),*args],check=True,capture_output=True)\n"
     )
+    validate = project.base / "validate-message.py"
+    validate.write_text(
+        "import os, pathlib, subprocess\n"
+        "base=os.environ['REPOSITORY_PUBLISH_BASE_REF']\n"
+        "assert len(base) in (40,64)\n"
+        "head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()\n"
+        "if head != base:\n"
+        " message=subprocess.check_output(['git','log','-1','--format=%B'],text=True)\n"
+        " assert 'Policy: '+pathlib.Path('policy.txt').read_text().strip() in message\n"
+    )
     success(
         project.publish(
             project.counter_writer(),
-            options=("--message-command", json.dumps([sys.executable, str(message)])),
+            options=(
+                "--message-command",
+                json.dumps([sys.executable, str(message)]),
+                "--validate-command",
+                json.dumps([sys.executable, str(validate)]),
+            ),
         )
     )
     assert "Policy: v2" in project.git("log", "-1", "--format=%B", root=project.remote)
     assert (project.state / "count").read_text() == "1"
+
+
+def test_validation_base_survives_concurrent_fetch_and_changes_after_rebase(project):
+    other = project.base / "other"
+    project.run(["git", "clone", str(project.remote), str(other)])
+    project.git("config", "user.name", "Other", root=other)
+    project.git("config", "user.email", "other@example.invalid", root=other)
+    seen = project.base / "validation-bases"
+    writer = project.writer(
+        "import subprocess\n"
+        f"other=Path({str(other)!r})\n"
+        "(other/'outside.md').write_text('concurrent update\\n')\n"
+        "for args in [['add','.'],['commit','-m','concurrent'],['push','origin','main']]:\n"
+        " subprocess.run(['git','-C',str(other),*args],check=True,capture_output=True)\n"
+        "subprocess.run(['git','fetch','origin'],check=True,capture_output=True)\n"
+        "(root/'archive/new.md').write_text('new archive\\n')\n"
+        "(state/'count').write_text('1')\n"
+    )
+    validate = [
+        sys.executable,
+        "-c",
+        (
+            "import os,pathlib,subprocess; "
+            "base=os.environ['REPOSITORY_PUBLISH_BASE_REF']; "
+            "subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True); "
+            f"p=pathlib.Path({str(seen)!r}); "
+            "p.open('a').write(base+'\\n')"
+        ),
+    ]
+    success(project.publish(writer, options=("--validate-command", json.dumps(validate))))
+    concurrent = project.git("rev-parse", "HEAD", root=other)
+    assert seen.read_text().splitlines() == [project.initial, concurrent]
+    assert project.git("show", "main:archive/new.md", root=project.remote) == "new archive"
+    assert project.git("show", "main:outside.md", root=project.remote) == "concurrent update"
+    assert (project.state / "count").read_text() == "1"
+    project.assert_clean()
 
 
 def test_push_race_retries_and_keeps_other_work(project):
