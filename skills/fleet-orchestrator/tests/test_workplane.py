@@ -4485,7 +4485,7 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
 
-    def test_empty_commander_cache_still_records_retryable_hygiene_alert(self):
+    def test_empty_commander_cache_records_hygiene_without_replaying_old_state(self):
         conn = wp.connect_writable()
         orc = self.load_orc()
         with conn:
@@ -4507,6 +4507,19 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertEqual(msg["target"], "role:commander")
         self.assertEqual(msg["send_state"], "recorded")
         self.assertIn("unheld role", msg["last_error"])
+        with mock.patch.object(wp, "bus_send", return_value=False) as send:
+            self.assertEqual(wp.retry_unsent(conn, log=lambda _: None), (0, 1))
+        send.assert_called_once()
+        with mock.patch.object(orc, "WATCHED_CHECKOUTS", [repo]), \
+                mock.patch.object(orc, "checkout_findings", return_value=[]), \
+                mock.patch.object(wp, "bus_send") as send:
+            orc.tick_checkout_hygiene(conn, dry=True)
+            self.assertEqual(conn.execute(
+                "SELECT send_state FROM task_msg WHERE purpose='checkout-dirty'"
+            ).fetchone()[0], "recorded")
+            orc.tick_checkout_hygiene(conn, dry=False)
+            self.assertEqual(wp.retry_unsent(conn), (0, 0))
+        send.assert_not_called()
 
     def test_empty_commander_keeps_escalation_on_the_original_task(self):
         conn = wp.connect_writable()
