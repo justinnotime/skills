@@ -2,8 +2,8 @@
 
 Version 3 (DeepSeek Harness 0.1.5, file name ``session.v3.jsonl.zstd``) keeps
 the version 0 event envelope. It replaces the header's ``seedLength`` with a
-boolean ``isSeeded`` (the inherited cut then comes from the ``session/end-seed``
-marker), surfaces the system prompt as a ``system/message`` event, embeds the
+boolean ``isSeeded`` (the inherited cut comes from the last ``session/end-seed``
+marker tagged ``inherited: true``), surfaces the system prompt as a ``system/message`` event, embeds the
 assistant stream inside ``assistant/message``, and adds the released event
 types listed below.
 """
@@ -38,6 +38,10 @@ SURFACE_EVENT_TYPES = {
     "system/message",
     "tool/result",
 }
+# DSH 0.1.5-rc.2 declares model/selection (api-session-controller),
+# deliverables/presented (tool-present), and subagent/catalog (subagent).
+# All three are log-only: they do not add messages, authorize file reads, or
+# turn a parent's child-discovery metadata into a child conversation.
 KNOWN_EVENT_TYPES = {
     "agent-preset/selected",
     "agent/inbox/spliced",
@@ -53,6 +57,7 @@ KNOWN_EVENT_TYPES = {
     "compaction/prune",
     "compaction/start",
     "compaction/summary",
+    "deliverables/presented",
     "feedback/message-delete",
     "feedback/message-put",
     "feedback/record",
@@ -61,6 +66,7 @@ KNOWN_EVENT_TYPES = {
     "hook/result",
     "llm/retry",
     "llm/retry-started",
+    "model/selection",
     "permission/preset",
     "plan/mode",
     "request/context",
@@ -73,6 +79,7 @@ KNOWN_EVENT_TYPES = {
     "session/title-llm-request",
     "step/end",
     "step/start",
+    "subagent/catalog",
     "subagent/descriptor",
     "system/message",
     "team/message/queued",
@@ -280,6 +287,10 @@ def _valid_header(header: Mapping[str, Any]) -> bool:
         and header.get("type") == "session"
         and not isinstance(header.get("version"), bool)
         and header.get("version") in SESSION_FORMAT_VERSIONS
+        and (
+            header["version"] != 3
+            or (isinstance(header.get("isSeeded"), bool) and "seedLength" not in header)
+        )
         and isinstance(header.get("id"), str)
         and bool(header["id"])
         and _safe_nonnegative_integer(header.get("createdAt"))
@@ -644,6 +655,7 @@ class DshDecoder:
             )
 
         seed_length = header.get("seedLength", 0)
+        seen_inherited_marker = False
         expected_seq = 0
         surface_nodes: list[int] = []
         event_records: dict[int, Mapping[str, Any]] = {}
@@ -712,6 +724,25 @@ class DshDecoder:
             expected_seq += 1
             seq = record["seq"]
             if record_type == "session/end-seed":
+                if header["version"] == 3:
+                    data = record["data"]
+                    if (
+                        not isinstance(data, dict)
+                        or not set(data).issubset({"inherited"})
+                        or ("inherited" in data and data["inherited"] is not True)
+                        or ("inherited" in data and not header["isSeeded"])
+                    ):
+                        return self._failure(snapshot, "DSH_EVENT_INVALID", "invalid")
+                    # V3's last tagged marker owns the fork-inherited cut.
+                    # Untagged markers only delimit resume/replay lifecycles;
+                    # they must not erase this Session's own conversation.
+                    if data.get("inherited") is True:
+                        seen_inherited_marker = True
+                        events = []
+                        seen_messages = set()
+                        user_markers = 0
+                        accepted = 0
+                    continue
                 if (
                     set(record) != {"type", "seq", "time", "data"}
                     or record["data"] != {}
@@ -812,6 +843,8 @@ class DshDecoder:
                 )
             )
 
+        if header["version"] == 3 and header["isSeeded"] and not seen_inherited_marker:
+            return self._failure(snapshot, "DSH_EVENT_INVALID", "invalid")
         observations = _observations(recognized, unknown, user_markers, accepted)
         if not any(event.role_hint == "user-like" for event in events):
             diagnostics = (
