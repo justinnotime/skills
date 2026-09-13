@@ -104,6 +104,53 @@ def test_native_output_and_version_skip(profile, monkeypatch):
     assert (doc / "README.md").read_text() == body
 
 
+def test_export_spacers_do_not_rewrite_existing_mirror(profile, monkeypatch):
+    export(monkeypatch, "# Sample\n\nOriginal words.\n")
+    assert run(profile) == 0
+    doc = profile[2] / "archive/sample--syntheti"
+    before = {p.name: p.read_bytes() for p in doc.iterdir() if p.is_file()}
+    monkeypatch.setattr(
+        mirror, "drive_meta", lambda *a: {"version": "2", "name": "Sample"}
+    )
+    export(monkeypatch, "# Sample\n\n&nbsp;\n\nOriginal words.\n\n&nbsp;\n")
+    assert run(profile) == 0
+    assert {p.name: p.read_bytes() for p in doc.iterdir() if p.is_file()} == before
+    checkpoint = Path(profile[1]["mirror"]["state_file"])
+    assert json.loads(checkpoint.read_text())[DOC_ID]["driveVersion"] == "2"
+
+
+def test_new_export_removes_spacers_without_hiding_word_changes(profile, monkeypatch):
+    export(monkeypatch, "# Sample\n\n&nbsp;\n\nOriginal words.\n\n&nbsp;\n")
+    assert run(profile) == 0
+    readme = profile[2] / "archive/sample--syntheti/README.md"
+    assert readme.read_text() == mirror.README_HEADER + "# Sample\n\nOriginal words.\n"
+    monkeypatch.setattr(
+        mirror, "drive_meta", lambda *a: {"version": "2", "name": "Sample"}
+    )
+    export(monkeypatch, "# Sample\n\n&nbsp;\n\nChanged words.\n")
+    assert run(profile) == 0
+    assert "Changed words." in readme.read_text()
+    assert "Original words." not in readme.read_text()
+    assert "&nbsp;" not in readme.read_text()
+
+
+@pytest.mark.parametrize("fence", ["```", "````", "~~~"])
+def test_export_spacing_preserves_literal_entities(fence):
+    literal = (
+        "Inline `&nbsp;` and between&nbsp;words.\n\n"
+        "    &nbsp;\n\n"
+        f"{fence}html\n&nbsp;\n\n\n{fence}\n"
+    )
+    source = "# Sample\n\n&nbsp;\n\n&nbsp;\n\n" + literal
+    expected = "# Sample\n\n" + literal
+    assert mirror.normalize_export_spacing(source) == expected
+    assert mirror.normalize_export_spacing(expected) == expected
+    assert mirror.render_matches_previous(source, expected)
+    assert not mirror.render_matches_previous(
+        expected, expected.replace("words", "text")
+    )
+
+
 def test_nested_tabs_keep_content_headings_and_links(profile, monkeypatch):
     export(
         monkeypatch,

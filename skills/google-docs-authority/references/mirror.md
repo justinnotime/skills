@@ -66,6 +66,14 @@ Each request makes at most three attempts, with one- and two-second waits.
 Authentication failures, other 403 errors and 404 responses are not retried.
 OAuth exchanges and publication writes have no automatic retry.
 
+Native export paragraphs containing only `&nbsp;` are normalized to blank lines
+before rendering and comparison with the existing mirror. Literal entities in
+inline text, indented code and fenced code remain intact. This normalization
+does not change the shared publication fingerprint format. Previously mirrored
+spacer paragraphs can be cleaned with the same pure
+`google_docs_authority.mirror.normalize_export_spacing` function without
+downloading exports or replacing attachments.
+
 When these attempts exhaust a temporary failure during the initial Drive
 version/name preflight, the mirror still attempts a full export; that preflight
 is an optimization. Authentication/configuration failures, inaccessible sources
