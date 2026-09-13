@@ -161,7 +161,8 @@ The shared-checkout patrol normally delivers findings to the configured
 task per affected checkout instead of retrying an undeliverable message.
 The same patrol refreshes that task's evidence and closes it after a clean
 inspection. These tasks appear in the existing board and operator-wait view;
-they do not require a separate schedule or an agent registration.
+they do not require a separate schedule or an agent registration. A missing
+checkout or failed Git inspection is reported and cannot close an existing task.
 
 Existing flat commands (`open`, `tree`, `kanban`, `statusline`, etc.),
 `orc --fleet NAME COMMAND`, `orc tview`, and verb-before-name lifecycle forms

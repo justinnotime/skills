@@ -4449,14 +4449,29 @@ class CheckoutHygieneTests(StoreTestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn(".claude/worktrees/wt/f", findings[0])
 
-    def test_clean_and_absent_are_silent(self):
+    def test_clean_is_silent_and_absent_is_reported(self):
         orc = self.load_orc()
         repo = self.make_repo(self.tmp.name)
         self.assertEqual(orc.checkout_findings(
             {"path": str(repo), "kind": "checkout", "exempt": ()}), [])
         self.assertEqual(orc.checkout_findings(
             {"path": str(Path(self.tmp.name) / "nope"), "kind": "checkout",
-             "exempt": ()}), [])
+             "exempt": ()}), ["MISSING CHECKOUT"])
+
+    def test_failed_inspection_is_not_reported_as_clean(self):
+        orc = self.load_orc()
+        repo = self.make_repo(self.tmp.name)
+        for kind in ("checkout", "bare-hub"):
+            with self.subTest(kind=kind), mock.patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
+                findings = orc.checkout_findings(
+                    {"path": str(repo), "kind": kind, "exempt": ()})
+                self.assertEqual(len(findings), 1)
+                self.assertIn("CHECK FAILED", findings[0])
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            self.assertEqual(orc.checkout_findings(
+                {"path": str(repo), "kind": "checkout", "exempt": ()}),
+                ["CHECK FAILED: git inspection unavailable"])
 
     def test_bare_hub_regression_flagged(self):
         orc = self.load_orc()
@@ -4505,6 +4520,11 @@ class CheckoutHygieneTests(StoreTestCase):
             self.assertTrue(wp.waits_on_operator(conn, task))
             self.assertIn("unexpected.tmp", task["body"])
             self.assertEqual(conn.execute("SELECT count(*) FROM task_msg").fetchone()[0], 0)
+            with mock.patch("subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess(["git"], 1, "", "")
+                orc.tick_checkout_hygiene(conn, dry=False)
+            self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")
+            self.assertIn("CHECK FAILED", wp.fetch(conn, task["id"])["body"])
             dirt.unlink()
             orc.tick_checkout_hygiene(conn, dry=True)
             self.assertEqual(wp.fetch(conn, task["id"])["state"], "open")

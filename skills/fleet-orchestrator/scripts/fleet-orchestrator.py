@@ -3084,13 +3084,15 @@ def checkout_findings(repo: dict) -> list[str]:
     from datetime import datetime, timezone as tz
     root = Path(cfg.expand(repo["path"]))
     if not root.exists():
-        return []
+        return ["MISSING CHECKOUT"]
     try:
         if repo["kind"] == "bare-hub":
             out = sp.run(["git", "-C", str(root), "rev-parse", "--is-bare-repository"],
                          text=True, capture_output=True, timeout=15)
             if out.returncode == 0 and out.stdout.strip() == "false":
                 return ["NON-BARE"]
+            if out.returncode:
+                return [f"CHECK FAILED: git rev-parse exited {out.returncode}"]
             return []
 
 
@@ -3098,9 +3100,9 @@ def checkout_findings(repo: dict) -> list[str]:
                       "--ignored=no", "--untracked-files=all"],
                      text=True, capture_output=True, timeout=30)
         if out.returncode != 0:
-            return []
+            return [f"CHECK FAILED: git status exited {out.returncode}"]
     except (OSError, sp.TimeoutExpired):
-        return []
+        return ["CHECK FAILED: git inspection unavailable"]
     findings = []
     for line in out.stdout.splitlines():
         if len(line) < 4:
