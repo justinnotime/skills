@@ -334,3 +334,243 @@ def test_diagnostics_never_include_path_or_transcript() -> None:
 
     assert "fixture/session" not in rendered
     assert "not-json" not in rendered
+
+
+def rows_v3(session_id: str = "fixture-session-v3") -> list[dict]:
+    """A native DeepSeek Harness 0.1.5 session: version 3 header, surfaced
+    system prompt, plugin-injected user snapshots, one tool round trip, and an
+    assistant message carrying its embedded stream and usage."""
+    tool_call_id = "fixture-tool-call"
+    return [
+        {
+            "type": "session",
+            "version": 3,
+            "id": session_id,
+            "createdAt": 1_700_000_000_000,
+            "cwd": "/fixture/project-beta",
+            "isSeeded": False,
+            "delegationDepth": 0,
+        },
+        {
+            "type": "permission/preset",
+            "seq": 0,
+            "time": 1_700_000_000_001,
+            "data": {"preset": "workspace-write"},
+        },
+        {
+            "type": "agent/inbox/spliced",
+            "seq": 1,
+            "time": 1_700_000_000_002,
+            "data": {
+                "target": "next-turn",
+                "start": 0,
+                "inserted": [message("direct", "user", "direct fixture", "user")],
+            },
+        },
+        {
+            "type": "turn/start",
+            "seq": 2,
+            "time": 1_700_000_000_003,
+            "data": {"turn": 1},
+        },
+        {
+            "type": "step/start",
+            "seq": 3,
+            "time": 1_700_000_000_004,
+            "data": {"turn": 1, "step": 1},
+        },
+        {
+            "type": "system/message",
+            "seq": 4,
+            "time": 1_700_000_000_005,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "message": message(
+                    "system", "system", "system prompt fixture", "plugin"
+                ),
+            },
+            "surfaceOp": "append",
+        },
+        {
+            "type": "user/message",
+            "seq": 5,
+            "time": 1_700_000_000_006,
+            "data": message("direct", "user", "direct fixture", "user"),
+            "surfaceOp": "append",
+        },
+        {
+            "type": "user/message",
+            "seq": 6,
+            "time": 1_700_000_000_007,
+            "data": message("snapshot", "user", "runtime context fixture", "plugin"),
+            "surfaceOp": "append",
+        },
+        {
+            "type": "request/header",
+            "seq": 7,
+            "time": 1_700_000_000_008,
+            "data": {
+                "header": {
+                    "config": {
+                        "provider": "fixture-provider",
+                        "model": "fixture-model",
+                        "maxTokens": 128000,
+                    },
+                    "adapterDefaults": {"maxTokens": True},
+                    "tools": [],
+                },
+                "reason": "initial",
+            },
+        },
+        {
+            "type": "request/context",
+            "seq": 8,
+            "time": 1_700_000_000_009,
+            "data": {
+                "provider": "fixture-provider",
+                "model": "fixture-model",
+                "contextWindow": 1_000_000,
+            },
+        },
+        {
+            "type": "tool/call",
+            "seq": 9,
+            "time": 1_700_000_000_010,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "callId": tool_call_id,
+                "name": "bash",
+                "arguments": '{"command":"echo fixture"}',
+            },
+        },
+        {
+            "type": "tool/result",
+            "seq": 10,
+            "time": 1_700_000_000_011,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "message": {
+                    "id": "tool-result",
+                    "role": "user",
+                    "source": {"kind": "tool", "callId": tool_call_id},
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": tool_call_id,
+                            "content": [{"type": "text", "text": "fixture\n"}],
+                            "isError": False,
+                        }
+                    ],
+                },
+            },
+            "sourceEventSeqs": [9],
+            "surfaceOp": "append",
+        },
+        {
+            "type": "assistant/message",
+            "seq": 11,
+            "time": 1_700_000_000_012,
+            "data": {
+                "turn": 1,
+                "step": 2,
+                "message": message(
+                    "model-final", "assistant", "model fixture", "model"
+                ),
+                "usage": {"inputTokens": 2, "outputTokens": 2, "totalTokens": 4},
+                "stream": [
+                    {
+                        "type": "chunk",
+                        "time": 1_700_000_000_012,
+                        "text": "model fixture",
+                    }
+                ],
+            },
+            "surfaceOp": "append",
+        },
+        {
+            "type": "step/end",
+            "seq": 12,
+            "time": 1_700_000_000_013,
+            "data": {"turn": 1, "step": 2},
+        },
+        {
+            "type": "turn/end",
+            "seq": 13,
+            "time": 1_700_000_000_014,
+            "data": {"turn": 1, "reason": {"kind": "completed"}},
+        },
+    ]
+
+
+def test_native_v3_session_keeps_direct_user_and_model_text_only() -> None:
+    batch = DshDecoder().decode(snapshot(encode_jsonl(rows_v3())))
+
+    assert batch.completeness == "complete"
+    assert diagnostic_codes(batch) == set()
+    assert len(batch.sessions) == 1
+    session = batch.sessions[0]
+    assert session.session_id == "fixture-session-v3"
+    assert session.project_hint == "project-beta"
+    assert session.metadata["format_version"] == 3
+    assert [(event.role_hint, event.text) for event in session.events] == [
+        ("user-like", "direct fixture"),
+        ("assistant", "model fixture"),
+    ]
+    assert batch.observations.recognizable_user_markers == 1
+    assert batch.observations.accepted_direct_user_events == 1
+    assert batch.observations.recognized_record_counts["system/message"] == 1
+    assert batch.observations.unknown_record_counts == {}
+
+
+def test_v3_released_events_are_recognized_bookkeeping() -> None:
+    records = rows_v3()
+    records.insert(
+        9,
+        {
+            "type": "v3/opaque-released-event",
+            "seq": 8,
+            "time": 1_700_000_000_009,
+            "data": {"opaque": True},
+        },
+    )
+    for record in records[10:]:
+        record["seq"] += 1
+    records[12]["sourceEventSeqs"] = [10]
+
+    batch = DshDecoder().decode(snapshot(encode_jsonl(records)))
+
+    assert batch.completeness == "complete"
+    assert len(batch.sessions) == 1
+    assert batch.observations.unknown_record_counts == {}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value[0].update(version=2),
+        lambda value: value[0].update(isSeeded="yes"),
+        lambda value: value[0].update(seedLength=1, isSeeded=None),
+        lambda value: value[5].pop("surfaceOp"),
+    ],
+)
+def test_v3_header_and_system_message_stay_strict(mutate) -> None:
+    records = rows_v3()
+    mutate(records)
+
+    batch = DshDecoder().decode(snapshot(encode_jsonl(records)))
+
+    assert batch.completeness == "invalid"
+    assert batch.sessions == ()
+
+
+def test_v0_header_rejects_the_v3_seed_flag() -> None:
+    records = rows()
+    records[0]["isSeeded"] = False
+
+    batch = DshDecoder().decode(snapshot(encode_jsonl(records)))
+
+    assert batch.completeness == "invalid"
+    assert diagnostic_codes(batch) == {"DSH_HEADER_INVALID"}

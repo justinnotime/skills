@@ -1,4 +1,12 @@
-"""Strict decoder for DeepSeek Harness session format version 0."""
+"""Strict decoder for DeepSeek Harness session formats version 0 and version 3.
+
+Version 3 (DeepSeek Harness 0.1.5, file name ``session.v3.jsonl.zstd``) keeps
+the version 0 event envelope. It replaces the header's ``seedLength`` with a
+boolean ``isSeeded`` (the inherited cut then comes from the ``session/end-seed``
+marker), surfaces the system prompt as a ``system/message`` event, embeds the
+assistant stream inside ``assistant/message``, and adds the released event
+types listed below.
+"""
 
 from __future__ import annotations
 
@@ -20,17 +28,23 @@ from ..model import (
     SourceSnapshot,
 )
 
-SESSION_FORMAT_VERSION = 0
+SESSION_FORMAT_VERSIONS = {0, 3}
 MAX_SAFE_INTEGER = 2**53 - 1
 ZSTD_MAGIC = 0xFD2FB528
 PACKED_ROW_TYPES = {"text-chunks", "reasoning-chunks", "tool-call-chunks"}
-SURFACE_EVENT_TYPES = {"user/message", "assistant/message", "tool/result"}
+SURFACE_EVENT_TYPES = {
+    "user/message",
+    "assistant/message",
+    "system/message",
+    "tool/result",
+}
 KNOWN_EVENT_TYPES = {
     "agent-preset/selected",
     "agent/inbox/spliced",
     "approval/asked",
     "approval/decided",
     "approval/policy",
+    "assistant/attempt",
     "assistant/chunk",
     "assistant/message",
     "command/done",
@@ -39,6 +53,8 @@ KNOWN_EVENT_TYPES = {
     "compaction/prune",
     "compaction/start",
     "compaction/summary",
+    "feedback/message-delete",
+    "feedback/message-put",
     "feedback/record",
     "goal/change",
     "hook/invoked",
@@ -51,12 +67,15 @@ KNOWN_EVENT_TYPES = {
     "request/header",
     "sandbox/mode",
     "schedule/change",
+    "session-log-deepseek/delivery-accepted",
     "session/end-seed",
     "session/title",
     "session/title-llm-request",
     "step/end",
     "step/start",
     "subagent/descriptor",
+    "system/message",
+    "team/message/queued",
     "todo/write",
     "tool-workflow/agent-end",
     "tool-workflow/agent-start",
@@ -65,10 +84,13 @@ KNOWN_EVENT_TYPES = {
     "tool/call",
     "tool/code-dispatch",
     "tool/code-dispatch-start",
+    "tool/ptc-dispatch",
+    "tool/ptc-dispatch-start",
     "tool/result",
     "turn/end",
     "turn/start",
     "user/message",
+    "v3/opaque-released-event",
     "web/deepseek-search-llm-request",
 }
 EVENT_KEYS = {
@@ -87,6 +109,7 @@ HEADER_KEYS = {
     "createdAt",
     "cwd",
     "seedLength",
+    "isSeeded",
     "delegationDepth",
     "parentSession",
     "origin",
@@ -255,8 +278,8 @@ def _valid_header(header: Mapping[str, Any]) -> bool:
     return (
         set(header).issubset(HEADER_KEYS)
         and header.get("type") == "session"
-        and header.get("version") == SESSION_FORMAT_VERSION
         and not isinstance(header.get("version"), bool)
+        and header.get("version") in SESSION_FORMAT_VERSIONS
         and isinstance(header.get("id"), str)
         and bool(header["id"])
         and _safe_nonnegative_integer(header.get("createdAt"))
@@ -273,6 +296,10 @@ def _valid_header(header: Mapping[str, Any]) -> bool:
         and (
             "seedLength" not in header
             or _safe_nonnegative_integer(header["seedLength"])
+        )
+        and (
+            "isSeeded" not in header
+            or (header["version"] != 0 and isinstance(header["isSeeded"], bool))
         )
         and ("origin" not in header or header["origin"] == "subagent")
         and ("agentPreset" not in header or isinstance(header["agentPreset"], str))
@@ -814,7 +841,7 @@ class DshDecoder:
                     project_hint=Path(cwd).name if isinstance(cwd, str) else None,
                     conversation_kind="main",
                     events=tuple(events),
-                    metadata={"format_version": SESSION_FORMAT_VERSION},
+                    metadata={"format_version": header["version"]},
                 ),
             ),
             observations=observations,
