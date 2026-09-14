@@ -1,15 +1,27 @@
 ---
 name: agent-harness-integration
-description: Integrate a new agent harness, profile, or machine with shared Skills, state backup, session and prompt extraction, ORC hooks, and existing schedules. Use for harness onboarding and cross-mechanism acceptance; delegates implementation to existing packages rather than creating another installer or scheduler.
+description: Add a harness, node, or profile, or upgrade an existing deployment across shared Skills, backup, session and raw-prompt extraction, scheduling, and selected agent hooks. Use as the integration entry point across these mechanisms; individual package operations remain with their owning Skills.
 ---
 
 # Agent Harness Integration
 
-Use this workflow when adding a harness or checking whether an existing one is
-fully integrated. This is an instruction-only Skill, not an installation
-command. Read optional caller instructions from `AGENT_HARNESS_INTEGRATION_PROFILE`
+Start here for the overall harness × node × profile model, adding one dimension,
+or bringing an existing deployment onto a selected newer mechanism. This Skill
+owns the integration workflow and acceptance; each package owns its executable
+behavior and configuration format. It adds no runtime or installation command.
+Read optional caller instructions from `AGENT_HARNESS_INTEGRATION_PROFILE`
 or `${XDG_CONFIG_HOME:-$HOME/.config}/agent-harness-integration/profile.md`.
 Missing private instructions do not grant access to accounts or session roots.
+
+## Select the operation
+
+- **Add a node, harness or profile:** read the [model and extension procedure](references/extensions.md).
+  Establish the changed dimension and reuse supported behavior through configuration.
+- **Upgrade an existing deployment:** read the [upgrade procedure](references/upgrades.md).
+  Compare installed code and selected configuration with the intended target;
+  a newer checkout alone does not establish an upgraded running deployment.
+- **Check integration:** use the [acceptance checks](references/acceptance.md)
+  for the selected capabilities. Read only the owning Skills needed for the task.
 
 ## Establish scope
 
@@ -22,10 +34,9 @@ First ask what duplicate mechanism can be removed. Reuse existing installers,
 source readers, publishers and schedules. Do not create a combined registry,
 configuration generator, per-harness cron, or private copy of public code.
 
-Treat node, harness and profile as independent selections. Use the
-[extension rules](references/extensions.md) when adding any of them: another
-node or profile normally changes private configuration; a new native format
-changes only the owning adapters. Do not clone a runtime for each combination.
+Treat node, harness and profile as independent selections. Another node or
+profile normally changes private configuration; a new native format changes
+only the owning adapters. Do not clone a runtime for each combination.
 
 Choose the required capabilities with the caller. Report each as applicable,
 not applicable with a reason, or unsupported; never silently omit a mechanism.
@@ -42,6 +53,7 @@ service restarts or native hook trust. Follow the request's actual authority.
 | Original state backup | `state-backup` | Selected files, consistent database snapshot, credential exclusions, destination and restore procedure |
 | Remote replication inspection | `syncthing-doctor` and native Syncthing inspection | Actual shared directory, ignore rules, receiving devices, file availability and receiver retention |
 | Session history and human prompts | `agent-session-extraction` | Decoder if needed, explicit source authorization, identity, author classification, timestamps and output ownership |
+| Scheduled jobs and dependencies | `data-pipeline` | Explicit node selector, job command/configuration, inputs, program and credential-path dependencies, outputs, schedule, locks and logs |
 | Registration and messages | `agent-bus`, implemented by `fleet-orchestrator` | Stable session binding, native delivery adapter, explicit processed acknowledgment and restart behavior |
 | Tasks, lifecycle and turn hooks | `fleet-orchestrator` | Consistent fleet selection, native hook compatibility/trust, obligation review and departure |
 | Git publication | `repository-publish` | Existing transaction, owned paths, validation, locks and recoverable progress |
@@ -51,6 +63,12 @@ Load each selected owner's Skill and use its documented public commands. An
 uninstalled package is a missing prerequisite, not permission to reconstruct
 its implementation here. Packages must remain independently installable; use
 configured executable interfaces, never sibling-package internal imports.
+
+Session histories and raw human prompts are configured outputs of the same
+extraction mechanism. Extend that source manifest; a second prompt reader or
+cron is not needed merely because both outputs are required. Translation and
+summaries are separate consumers. Pipeline input declarations describe
+dependencies; they do not replace the reader's explicit source selection.
 
 ## Keep the contracts aligned
 
