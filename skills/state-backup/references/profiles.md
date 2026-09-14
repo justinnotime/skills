@@ -7,6 +7,14 @@ assign meaning to a label.
 
 This filename is retained for compatibility with existing links.
 
+## Interpreter requirement
+
+The runtime requires Bash 4.3 or newer for configured project selections. Its
+entry selects `bash` from PATH, preserving direct and symlink invocations on
+systems whose `/bin/bash` is older. On macOS install a current Bash and include
+its directory in the scheduler's configured PATH. Test the exact scheduled
+environment with `backup --check`; the interactive shell's PATH is insufficient.
+
 ## Default behavior
 
 With no per-machine config, the script discovers the tools' native locations:

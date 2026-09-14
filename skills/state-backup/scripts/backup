@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Universal Backup Script
 # Supports a unified backup structure for multiple agent harnesses

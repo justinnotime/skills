@@ -10,6 +10,9 @@ call the repository-root `backup.sh` compatibility link or `~/bin/backup`;
 preserve both paths, `~/.config/backup/config`, existing `*_PROFILES` formats,
 and existing destination names.
 
+The executable requires Bash 4.3+ selected from PATH. macOS system Bash is older;
+configure a current Bash in the scheduled environment before activation.
+
 Before changing backup behavior, read
 [the source-root contract](references/profiles.md). Support native-default-only and
 additional-root installations. Treat every configured label as an opaque
