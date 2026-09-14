@@ -9,6 +9,14 @@ This package owns scheduling and dispatch. Each configured command owns its
 actual reading, transformation, credentials, cleanup and publication. Invoke
 commands through their executable interfaces; do not import sibling Skills.
 
+For a short ordered operation, use a job's `commands` argument arrays instead
+of a shell wrapper. They share one environment, lock and total timeout. Every
+command must succeed before the next starts; the first failure stops the job.
+Prefer native commands whose exit status represents the operation. An aggregate
+tool that swallows child failures cannot establish that a later push is safe.
+Keep complex transactions and recovery inside their existing owning command;
+this is an ordered list, not dependencies between independently scheduled jobs.
+
 Use `scripts/run` as the periodic trigger. With no arguments it continues to
 read `~/.config/data-pipeline/config.json` (or the normal XDG equivalent), so
 existing cron entries work unchanged. For multiple repositories under one

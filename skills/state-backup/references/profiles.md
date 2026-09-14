@@ -128,6 +128,15 @@ Re-authenticate after restoring onto another host. Secrets embedded in custom
 filenames, settings, or transcripts cannot be detected reliably by a generic
 backup tool and remain the operator's responsibility.
 
+Native credential-file exclusions do not make generated configuration safe.
+Separate credentials at its producing/installing command, including normal
+refresh and profile provisioning, before enabling configuration backup. For
+OpenCode generated JSON, `agent-harness-profiles` provides an explicit
+`scripts/install-opencode-config` command; backup does not invoke or import it.
+Verify with a synthetic key that settings are retained, native auth is omitted,
+and a fresh-node restore requires separate authentication. This script does
+not sanitize old copies already present on local or receiving backup trees.
+
 ## Consistency and safety
 
 - Discovered opencode SQLite databases require `sqlite3 .backup`. Missing sqlite3,

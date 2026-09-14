@@ -342,7 +342,7 @@ jobs:
         working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
         run: |
           bash tests/run.sh
-          if [[ "$SKILL" == state-backup ]]; then
+          if [[ "$SKILL" == state-backup || "$SKILL" == agent-harness-profiles ]]; then
             python3 -B -m unittest discover -s tests -v
           fi
       - name: Lint session extraction entry point

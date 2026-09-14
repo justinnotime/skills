@@ -22,6 +22,11 @@ First ask what duplicate mechanism can be removed. Reuse existing installers,
 source readers, publishers and schedules. Do not create a combined registry,
 configuration generator, per-harness cron, or private copy of public code.
 
+Treat node, harness and profile as independent selections. Use the
+[extension rules](references/extensions.md) when adding any of them: another
+node or profile normally changes private configuration; a new native format
+changes only the owning adapters. Do not clone a runtime for each combination.
+
 Choose the required capabilities with the caller. Report each as applicable,
 not applicable with a reason, or unsupported; never silently omit a mechanism.
 Source inspection does not authorize reading every profile. Installation does
@@ -55,6 +60,11 @@ configured executable interfaces, never sibling-package internal imports.
 2. **Private configuration:** changing XDG roots can redirect child tools too.
    Explicitly select shared configuration where intended. Do not copy credentials
    or replace special launchers with a generic function without review.
+   Classify generated settings before installation: native auth stays outside
+   versioned settings and replicated backup. Use the owning native-format
+   installer; for generated OpenCode JSON, `agent-harness-profiles` supplies
+   `scripts/install-opencode-config`. Do not write the generator's mixed output
+   straight into a backed-up config directory.
 3. **Session identity:** define native conversation, root, machine, terminal and
    bus identity separately. Mirrors of one session use the same extraction node;
    independent sessions must not collide. Preserve shipped identities during a
@@ -74,6 +84,9 @@ configured executable interfaces, never sibling-package internal imports.
 7. **Failure and recovery:** an unreadable required source is not an empty one.
    Do not disable required-source checks to obtain a successful result. Preserve
    good database snapshots, original sources and published progress on failure.
+   For a short ordered fetch/transform/publish operation, use data-pipeline's
+   native `commands` list and verify each command's failure status. Do not use
+   the success of an aggregate fetch or the last shell command as upstream proof.
 
 Use [acceptance checks](references/acceptance.md) before calling an integration
 complete. A new decoder requires its package's registration/schema and synthetic

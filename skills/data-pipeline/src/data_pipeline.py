@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -182,9 +183,19 @@ def load(selector_path, home=None):
             raise Invalid("configure the child PATH explicitly")
         zone = ZoneInfo(nodes[node]["timezone"])
         schedule(item["schedule"])
-        command = [expand(a, environment) for a in item["argv"]]
-        if not command or not Path(command[0]).is_absolute():
-            raise Invalid("the job executable must be an absolute configured path")
+        if ("argv" in item) == ("commands" in item):
+            raise Invalid("a job requires exactly one of argv or commands")
+        configured = [item["argv"]] if "argv" in item else item["commands"]
+        if not isinstance(configured, list) or not configured:
+            raise Invalid("commands must be a nonempty list of argument lists")
+        commands = []
+        for arguments in configured:
+            if not isinstance(arguments, list) or not arguments:
+                raise Invalid("each command must be a nonempty argument list")
+            command = [expand(a, environment) for a in arguments]
+            if not Path(command[0]).is_absolute():
+                raise Invalid("the job executable must be an absolute configured path")
+            commands.append(command)
         closure, visiting = {}, set()
 
         def collect(name):
@@ -265,7 +276,8 @@ def load(selector_path, home=None):
         jobs.append(
             {
                 **item,
-                "argv": command,
+                **({"argv": commands[0]} if "argv" in item else {}),
+                "commands": commands,
                 "environment": environment,
                 "timezone": str(zone),
                 "resources": closure,
@@ -305,8 +317,9 @@ def load(selector_path, home=None):
 
 def doctor(job):
     failures = []
-    if not os.access(job["argv"][0], os.X_OK):
-        failures.append(f"job executable unavailable: {job['argv'][0]}")
+    for command in job["commands"]:
+        if not os.access(command[0], os.X_OK):
+            failures.append(f"job executable unavailable: {command[0]}")
     for name, resource in job["resources"].items():
         if (
             name not in job["required_resources"]
@@ -381,21 +394,34 @@ def execute(job, at, force=False):
             else:
                 process = None
                 try:
-                    process = subprocess.Popen(
-                        job["argv"],
-                        cwd=job["cwd"],
-                        env=job["environment"],
-                        stdin=subprocess.DEVNULL,
-                        stdout=output,
-                        stderr=output,
-                        start_new_session=True,
-                        pass_fds=(lock.fileno(),),
-                    )
-                    code = process.wait(timeout=job["timeout_seconds"])
-                    result.update(
-                        status="ok" if code == 0 else "failed", returncode=code
-                    )
+                    deadline = time.monotonic() + job["timeout_seconds"]
+                    result["completed_commands"] = 0
+                    for index, command in enumerate(job["commands"], start=1):
+                        result["command_index"] = index
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            result.pop("returncode", None)
+                            result.update(status="failed", error="timeout")
+                            break
+                        process = subprocess.Popen(
+                            command,
+                            cwd=job["cwd"],
+                            env=job["environment"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=output,
+                            stderr=output,
+                            start_new_session=True,
+                            pass_fds=(lock.fileno(),),
+                        )
+                        code = process.wait(timeout=remaining)
+                        result.update(
+                            status="ok" if code == 0 else "failed", returncode=code
+                        )
+                        if code != 0:
+                            break
+                        result["completed_commands"] = index
                 except subprocess.TimeoutExpired:
+                    result.pop("returncode", None)
                     os.killpg(process.pid, signal.SIGTERM)
                     try:
                         process.wait(timeout=5)
@@ -409,6 +435,7 @@ def execute(job, at, force=False):
                     process.wait()
                     result.update(status="failed", error="timeout")
                 except OSError as exc:
+                    result.pop("returncode", None)
                     result.update(status="failed", error=str(exc))
             result["finished"] = datetime.now(timezone.utc).isoformat()
             output.write(json.dumps(result) + "\n")
