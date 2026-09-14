@@ -108,6 +108,23 @@ class DiscoveryDirectoriesTest(unittest.TestCase):
         with self.assertRaises(PipelineError):
             run(self.root / "manifest.json", dry_run=True, environ={})
 
+    def test_directory_symlink_is_refused_before_globbing(self):
+        transcript(
+            self.input / "unselected/agent-transcripts/private.jsonl",
+            "UNSELECTED_PRIVATE",
+        )
+        (self.input / "selected/link").symlink_to(
+            self.input / "unselected", target_is_directory=True
+        )
+        self.load()
+        with patch.object(
+            sources.glob,
+            "iglob",
+            side_effect=AssertionError("must not glob through link"),
+        ):
+            with self.assertRaises(PipelineError):
+                run(self.root / "manifest.json", dry_run=True, environ={})
+
     def test_two_nodes_two_profiles_preserve_independent_sessions(self):
         data = deepcopy(self.data)
         data["sources"] = []

@@ -30,7 +30,8 @@ For a shared directory, glob discovery may specify `directories`, a nonempty
 list of literal relative subdirectories. Each must exist and remain confined;
 missing selections fail even with `allow_empty=true`. Patterns are evaluated
 relative to each selected directory. Unselected sibling trees are not traversed,
-read or decoded. Symlinks into unselected siblings are refused, including during
+read or decoded. Directory symlinks in selected trees are refused before globbing;
+file symlinks into unselected siblings are refused, including during
 open-file revalidation. Omit the field to retain the existing whole-root behavior.
 Do not use a project-output filter as a substitute for selecting input.
 

@@ -104,6 +104,8 @@ def discovery_roots(source: SourceSpec, root: ValidatedRoot) -> tuple[Path, ...]
         return (root.lexical,)
     for base in bases:
         validate_candidate(source, root, base)
+        if base.is_symlink():
+            raise SourceAccessError("selected discovery directory must not be a symlink")
         if not base.is_dir():
             raise SourceAccessError("selected discovery directory is missing or not a directory")
     return bases
@@ -128,10 +130,15 @@ def discover_candidates(source: SourceSpec, root: ValidatedRoot) -> tuple[Path, 
             if not base.is_dir():
                 raise SourceAccessError("selected discovery directory is missing or not a directory")
             try:
-                for _directory, _subdirectories, _filenames in os.walk(
+                for directory, subdirectories, _filenames in os.walk(
                     base, onerror=raise_walk_error
                 ):
-                    pass
+                    if source.discovery.directories and any(
+                        (Path(directory) / name).is_symlink() for name in subdirectories
+                    ):
+                        # glob follows directory links. Refuse them before globbing
+                        # so an allowed project cannot traverse a sibling tree.
+                        raise SourceAccessError("selected discovery tree contains a directory symlink")
             except OSError as exc:
                 raise SourceAccessError("source tree is unreadable") from exc
             for pattern in source.discovery.patterns:
