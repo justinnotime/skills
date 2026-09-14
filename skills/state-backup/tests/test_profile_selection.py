@@ -17,7 +17,7 @@ class ProfileSelectionTest(unittest.TestCase):
         self.root = Path(temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.env = {"HOME": str(self.home), "PATH": os.defpath, "LC_ALL": "C"}
+        self.env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}
         # A broken unrelated repository must never be consulted by --config.
         legacy = self.home / ".config/backup/config"
         legacy.parent.mkdir(parents=True)

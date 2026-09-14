@@ -148,6 +148,23 @@ exit 97
         )
         return result
 
+    def test_direct_and_legacy_entries_use_configured_bash(self) -> None:
+        interpreter = shutil.which("bash")
+        self.assertIsNotNone(interpreter)
+        marker = self.test_root / "selected-bash"
+        command = self.command_directory / "bash"
+        command.write_text(
+            "#!/bin/sh\n"
+            f"printf 'selected\\n' >> {shlex.quote(str(marker))}\n"
+            f"exec {shlex.quote(interpreter)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        command.chmod(0o755)
+        self._write_file(self.home / ".dsh/sessions/selected.jsonl", "{}\n")
+        self._run_backup()
+        self._run_backup(through_home_symlink=True)
+        self.assertEqual(marker.read_text().splitlines(), ["selected", "selected"])
+
     def _database_fixture(self) -> tuple[Path, Path]:
         source = self.home / ".local/share/opencode/opencode.db"
         destination = self.home / "syncthing/backup/fixture-node/opencode/db/opencode.db"
@@ -182,7 +199,7 @@ exit 97
 
     def test_missing_sqlite_preserves_snapshot_and_continues_other_harnesses(self) -> None:
         _, destination = self._database_fixture()
-        for name in ("mkdir", "dirname", "date", "tee", "find", "wc", "du", "cut", "basename"):
+        for name in ("bash", "mkdir", "dirname", "date", "tee", "find", "wc", "du", "cut", "basename"):
             (self.command_directory / name).symlink_to(shutil.which(name))
         self.environment["PATH"] = str(self.command_directory)
         result = self._run_backup(expected_status=1)
