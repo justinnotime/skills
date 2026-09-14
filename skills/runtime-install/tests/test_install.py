@@ -347,3 +347,13 @@ def test_preflight_failure_does_not_print_external_diagnostics(tmp_path, capsys)
     output = capsys.readouterr()
     assert "synthetic-private-body" not in output.err + output.out
     assert not (tmp_path / "locks").exists()
+
+
+def test_exact_unmarked_trigger_is_adopted_without_removing_other_consumers():
+    line = "* * * * /example/data-pipeline/scripts/run"
+    other = line + " --config /another/repository/node.json"
+    config = {"markers": ["# BEGIN sample", "# END sample"], "lines": [line]}
+    result = install.cron_text(line + "\n" + other + "\n", config)
+    assert result.splitlines().count(line) == 1
+    assert other + "\n" in result
+    assert install.cron_text(result, config) == result

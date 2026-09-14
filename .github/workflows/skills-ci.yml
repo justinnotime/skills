@@ -119,6 +119,14 @@ jobs:
             kind: python
             python: "3.14"
             check: Python 3.14
+          - skill: data-pipeline
+            kind: python
+            python: "3.10"
+            check: Python 3.10
+          - skill: data-pipeline
+            kind: python
+            python: "3.14"
+            check: Python 3.14
           - skill: runtime-install
             kind: python
             python: "3.10"
@@ -378,7 +386,7 @@ jobs:
           uv run --no-sync ruff check tests/test_publication.py --select E4,E7,E9,F
           bash -n scripts/sync
       - name: Check configured local runtime tools
-        if: matrix.skill == 'runtime-install' || matrix.skill == 'runtime-layout' || matrix.skill == 'workspace-brief'
+        if: matrix.skill == 'data-pipeline' || matrix.skill == 'runtime-install' || matrix.skill == 'runtime-layout' || matrix.skill == 'workspace-brief'
         working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
         run: |
           uv run --no-sync ruff check src tests

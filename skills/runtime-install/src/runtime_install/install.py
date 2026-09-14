@@ -331,9 +331,9 @@ def cron_text(original, config):
     remove = [argv(item) for item in config.get("remove_commands", [])]
     kept = []
     for i, line in enumerate(lines):
-        if any(a <= i <= b for a, b in intervals) or stripped[i] in config.get(
-            "remove_lines", []
-        ):
+        if (any(a <= i <= b for a, b in intervals)
+                or stripped[i] in config.get("remove_lines", [])
+                or stripped[i] in config["lines"]):
             continue
         parts = tokens(stripped[i])
         if any(
