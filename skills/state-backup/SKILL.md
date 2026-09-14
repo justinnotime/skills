@@ -28,6 +28,8 @@ conversationally:
 
 ```bash
 scripts/backup
+# Repository-owned selection (legacy invocation above remains supported):
+scripts/backup --config /absolute/path/to/backup.conf --check
 ```
 
 From this Skill directory, run these checks after any backup behavior or

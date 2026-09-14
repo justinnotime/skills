@@ -140,6 +140,9 @@ profile_reserve_native_roots() {
     profile_reserve_path 'native Codex state' "${CODEX_HOME}"
   [[ "${excluded_tool}" == dsh ]] ||
     profile_reserve_path 'native DeepSeek Harness state' "${DSH_HOME}"
+  if [[ -n "${CURSOR_PROFILES:-}" && "${excluded_tool}" != cursor ]]; then
+    profile_reserve_path 'native Cursor configuration' "${CURSOR_HOME:-${PROFILE_INSTALL_HOME}/.cursor}"
+  fi
   if [[ "${excluded_tool}" != opencode ]]; then
     profile_reserve_path 'native OpenCode data' "${OPENCODE_DATA_DIR}"
     profile_reserve_path 'native OpenCode config' "${OPENCODE_CONFIG_SRC}"

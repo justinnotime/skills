@@ -58,6 +58,7 @@ CLAUDE_PROFILES="${CLAUDE_PROFILES:-}"
 CODEX_PROFILES="${CODEX_PROFILES:-}"
 OPENCODE_PROFILES="${OPENCODE_PROFILES:-}"
 DSH_PROFILES="${DSH_PROFILES:-}"
+CURSOR_PROFILES="${CURSOR_PROFILES:-}"
 CLAUDE_HOME="${CLAUDE_HOME:-${PROFILE_INSTALL_HOME}/.claude}"
 CODEX_HOME="${CODEX_HOME:-${PROFILE_INSTALL_HOME}/.codex}"
 DSH_HOME="${DSH_HOME:-${PROFILE_INSTALL_HOME}/.dsh}"
@@ -122,26 +123,28 @@ emit_space_separated() {
   done
 }
 
-emit_dsh() {
-  local mode=$1 entry label path seen="" executable=${DSH_COMMAND:-dsh}
-  if [[ -n "${DSH_PROFILES}" && -n "${DSH_COMMAND:-}" && "${executable}" != /* ]]; then
-    fail 'DSH_COMMAND must name an absolute executable command'
+emit_lines() {
+  local tool=$1 command_name=$2 variable_name=$3 root_variable=$4 mode=$5
+  local entry label path seen="" command_variable executable value
+  value=${!variable_name}
+  command_variable=${variable_name%_PROFILES}_COMMAND
+  executable=${!command_variable:-$command_name}
+  if [[ -n "$value" && -n "${!command_variable:-}" && "$executable" != /* ]]; then
+    fail "${command_variable} must name an absolute executable command"
   fi
   while IFS= read -r entry; do
-    [[ -n "${entry}" ]] || continue
-    label=${entry%%:*}
-    path=${entry#*:}
-    [[ -n "${label}" && "${label}" != "${entry}" && -n "${path}" ]] ||
-      fail "malformed DSH_PROFILES entry: ${entry}"
-    profile_validate_root dsh "${label}" "${path}"
-    [[ " ${seen} " != *" ${label} "* ]] || fail "duplicate dsh label: ${label}"
-    seen="${seen} ${label}"
-    if [[ "${mode}" == check ]]; then
-      launcher_check "dsh-${label}" "${executable}" DSH_COMMAND
+    [[ -n "$entry" ]] || continue
+    label=${entry%%:*}; path=${entry#*:}
+    [[ -n "$label" && "$label" != "$entry" && -n "$path" ]] || fail "malformed ${variable_name} entry"
+    profile_validate_root "$tool" "$label" "$path"
+    [[ " $seen " != *" $label "* ]] || fail "duplicate ${tool} label: ${label}"
+    seen="$seen $label"
+    if [[ "$mode" == check ]]; then
+      launcher_check "${command_name}-${label}" "$executable" "$command_variable"
     else
-      printf 'dsh-%s() {\n  DSH_HOME=%q command %q "$@"\n}\n\n' "${label}" "${path}" "${executable}"
+      printf '%s-%s() {\n  %s=%q command %q "$@"\n}\n\n' "$command_name" "$label" "$root_variable" "$path" "$executable"
     fi
-  done <<< "${DSH_PROFILES}"
+  done <<< "$value"
 }
 
 render_entries() {
@@ -154,7 +157,8 @@ render_entries() {
   emit_space_separated claude claude CLAUDE_PROFILES "${mode}"
   emit_space_separated codex codex CODEX_PROFILES "${mode}"
   emit_space_separated opencode opencode OPENCODE_PROFILES "${mode}"
-  emit_dsh "${mode}"
+  emit_lines dsh dsh DSH_PROFILES DSH_HOME "${mode}"
+  emit_lines cursor cursor-agent CURSOR_PROFILES CURSOR_CONFIG_DIR "${mode}"
 }
 
 render() {

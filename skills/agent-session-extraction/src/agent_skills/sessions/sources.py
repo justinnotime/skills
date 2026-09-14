@@ -98,6 +98,17 @@ def validate_configured_path(source: SourceSpec) -> ValidatedRoot:
     return ValidatedRoot(lexical, resolved)
 
 
+def discovery_roots(source: SourceSpec, root: ValidatedRoot) -> tuple[Path, ...]:
+    bases = tuple(root.lexical / item for item in source.discovery.directories)
+    if not bases:
+        return (root.lexical,)
+    for base in bases:
+        validate_candidate(source, root, base)
+        if not base.is_dir():
+            raise SourceAccessError("selected discovery directory is missing or not a directory")
+    return bases
+
+
 def discover_candidates(source: SourceSpec, root: ValidatedRoot) -> tuple[Path, ...]:
     if source.discovery.mode == "file":
         candidates = [root.lexical]
@@ -108,23 +119,35 @@ def discover_candidates(source: SourceSpec, root: ValidatedRoot) -> tuple[Path, 
         def raise_walk_error(error: OSError) -> None:
             raise SourceAccessError("source tree is unreadable") from error
 
-        try:
-            for _directory, _subdirectories, _filenames in os.walk(
-                root.lexical, onerror=raise_walk_error
-            ):
-                pass
-        except OSError as exc:
-            raise SourceAccessError("source tree is unreadable") from exc
+        # Authorize literal subtrees before walking or globbing. Keep the outer
+        # root for source_ref so narrowing selection does not rename sessions.
+        bases = discovery_roots(source, root)
         candidates = []
-        for pattern in source.discovery.patterns:
-            candidates.extend(
-                Path(item)
-                for item in glob.iglob(
-                    os.fspath(root.lexical / pattern), recursive=True
+        for base in bases:
+            validate_candidate(source, root, base)
+            if not base.is_dir():
+                raise SourceAccessError("selected discovery directory is missing or not a directory")
+            try:
+                for _directory, _subdirectories, _filenames in os.walk(
+                    base, onerror=raise_walk_error
+                ):
+                    pass
+            except OSError as exc:
+                raise SourceAccessError("source tree is unreadable") from exc
+            for pattern in source.discovery.patterns:
+                candidates.extend(
+                    Path(item)
+                    for item in glob.iglob(os.fspath(base / pattern), recursive=True)
                 )
-            )
     unique = sorted(set(candidates), key=lambda item: item.as_posix())
     return tuple(item for item in unique if item.is_file() or item.is_symlink())
+
+
+def _validate_selected_directory(source: SourceSpec, root: ValidatedRoot, resolved: Path) -> None:
+    if source.discovery.directories and not _beneath(
+        resolved, (root.resolved / item for item in source.discovery.directories)
+    ):
+        raise SourceAccessError("candidate escaped selected discovery directories")
 
 
 def validate_candidate(
@@ -147,6 +170,7 @@ def validate_candidate(
         raise SourceAccessError("candidate resolves outside its policy")
     if policy.candidate_beneath_root and not _beneath(resolved, (root.resolved,)):
         raise SourceAccessError("candidate resolves outside its configured source")
+    _validate_selected_directory(source, root, resolved)
     if _has_forbidden(resolved, policy):
         raise SourceAccessError("resolved candidate has a forbidden path component")
     if policy.symlinks == "reject" and lexical != resolved:
@@ -181,6 +205,7 @@ def _validate_open_descriptor(
         raise SourceAccessError("opened candidate escaped its configured source")
     if _has_forbidden(current_path, source.root_policy):
         raise SourceAccessError("opened candidate has a forbidden path component")
+    _validate_selected_directory(source, root, current_path)
     return opened
 
 
@@ -199,6 +224,7 @@ def stable_read(candidate: Path, source: SourceSpec, root: ValidatedRoot) -> byt
         actual_link = Path(f"/proc/self/fd/{descriptor}")
         if actual_link.exists():
             actual = actual_link.resolve(strict=True)
+            _validate_selected_directory(source, root, actual)
             allowed = tuple(
                 item.resolve(strict=True)
                 for item in source.root_policy.allowed_resolved_roots

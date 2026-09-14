@@ -14,6 +14,32 @@ for a repository's node selector. Neither implies an account or grants source
 access. A new combination requires no runtime changes when its formats and
 capabilities are already supported. Add code only for an actual new behavior.
 
+## Repository ownership and shared inputs
+
+Keep each repository's profile definitions self-contained. The node selects the
+file through the existing `--config` interface; it does not import all repositories
+into a fragment owned by one of them. Generate a separate launcher output for each
+repository, preserving global command-name collision checks. Backup also accepts
+`--config FILE`; repository-only selections set `BACKUP_INCLUDE_DEFAULT=false`
+and list their explicit roots. Add these invocations to existing repository jobs.
+A missing unselected repository must not stop the selected repository's commands.
+
+Cursor is another harness, and each Cursor profile is another source selection.
+The profiles package supports the native Agent CLI `CURSOR_CONFIG_DIR` override;
+verify actual transcript, IDE and credential paths separately. On a shared
+`projects/` directory, extraction's `discovery.directories` selects exact project
+subtrees before traversal. Backup has its own per-profile
+`CURSOR_PROJECT_ALLOWLIST`. Neither a root-selection launcher nor a project-output
+filter establishes input isolation. Do not infer access by decoding project names.
+
+For another supported combination, change configuration only. Prove this with
+synthetic independent nodes and profiles, including identical native session IDs
+in distinct configured origins. Add a matching transcript to an unselected
+sibling and require unchanged selected output. Remove a required selected directory
+and require failure, not empty success. Repeat with a symlink into the unselected
+sibling. Preserve existing identities and inspect the normal cleanup plan when
+narrowing a deployed input selection.
+
 ## Configuration and credentials
 
 Maintain each non-secret choice once under its owning private configuration.
@@ -61,7 +87,9 @@ actual configuration. Ask only for required information that cannot be inferred.
 > Integrate the selected node, harness and profile using the existing owners.
 > Identify which dimension changed and which native roots and credential source
 > are authorized. Reuse the current runtimes; change private configuration for
-> supported combinations. Remove superseded copies and invocations. Keep
+> supported combinations. Keep each repository independent of unselected repositories,
+> and select shared project inputs before scanning. Test a newly added transcript in
+> an unselected profile and a missing selected input. Remove superseded copies and invocations. Keep
 > credentials separate through generation, installation, backup and restore.
 > Run the applicable acceptance cases, including upstream failure with no
 > downstream publication. Report code support, installed configuration, active

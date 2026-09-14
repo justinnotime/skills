@@ -210,6 +210,7 @@ class Discovery:
     mode: str
     patterns: tuple[str, ...]
     superseded_sha256: tuple[str, ...]
+    directories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +492,7 @@ def _source(value: Any, environ: Mapping[str, str]) -> SourceSpec:
     _required(discovery_cfg, {"mode", "patterns"}, "source.discovery")
     _only(
         discovery_cfg,
-        {"mode", "patterns", "superseded_sha256"},
+        {"mode", "patterns", "superseded_sha256", "directories"},
         "source.discovery",
     )
     discovery_mode = _enum(
@@ -510,6 +511,19 @@ def _source(value: Any, environ: Mapping[str, str]) -> SourceSpec:
         for pattern in patterns
     ):
         raise ManifestError("candidate glob patterns must stay below their source root")
+    directories = _string_list(
+        discovery_cfg.get("directories", []), "source.discovery.directories"
+    )
+    if "directories" in discovery_cfg:
+        if discovery_mode != "glob" or not directories:
+            raise ManifestError("discovery directories require glob mode and a nonempty list")
+        if len(set(directories)) != len(directories) or any(
+            not value or value.startswith("/")
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+            or any(char in value for char in "*?[]\\\0\n\r")
+            for value in directories
+        ):
+            raise ManifestError("discovery directories must be unique literal relative paths")
     superseded_sha256 = _string_list(
         discovery_cfg.get("superseded_sha256", []),
         "source.discovery.superseded_sha256",
@@ -574,7 +588,7 @@ def _source(value: Any, environ: Mapping[str, str]) -> SourceSpec:
         _label(cfg["output_node"], "source.output_node"),
         _root_policy(cfg["root_policy"]),
         snapshot,
-        Discovery(discovery_mode, patterns, superseded_sha256),
+        Discovery(discovery_mode, patterns, superseded_sha256, directories),
         decoder,
         source_event,
         _bool(cfg["allow_empty"], "source.allow_empty"),

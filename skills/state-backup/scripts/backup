@@ -6,10 +6,29 @@
 set -euo pipefail
 
 # Load config first (so it can override defaults)
-CONFIG_FILE="$HOME/.config/backup/config"
+CONFIG_FILE="${BACKUP_CONFIG:-$HOME/.config/backup/config}"
+config_explicit=false
+[ -z "${BACKUP_CONFIG:-}" ] || config_explicit=true
+check_only=false
+while (( $# )); do
+  case "$1" in
+    --config)
+      [[ $# -ge 2 && -n "$2" ]] || { printf 'ERROR: --config needs a file\n' >&2; exit 2; }
+      CONFIG_FILE=$2; config_explicit=true; shift 2 ;;
+    --check) check_only=true; shift ;;
+    -h|--help)
+      printf 'usage: backup [--config FILE] [--check]\n'; exit 0 ;;
+    *) printf 'ERROR: unknown backup argument\n' >&2; exit 2 ;;
+  esac
+done
+# Optional per-Cursor-root lists of literal project directory names, one per line.
+declare -A CURSOR_PROJECT_ALLOWLIST=()
 if [ -f "$CONFIG_FILE" ]; then
-  # shellcheck disable=SC1090
+  # Trusted caller-owned shell configuration; no implicit second config is loaded.
   source "$CONFIG_FILE"
+elif [[ "$config_explicit" == true || -L "$CONFIG_FILE" ]]; then
+  printf 'ERROR: selected backup configuration is missing\n' >&2
+  exit 1
 fi
 
 # Configuration defaults (only used if not set by config)
@@ -41,7 +60,7 @@ OPENCODE_STATE_DIR="${OPENCODE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/
 # space-separated "name:path" entries for the first three tools, e.g.
 #   CLAUDE_PROFILES="alternate:$HOME/.claude-alt lab:$HOME/.claude-lab"
 # Each profile is backed up to ${CLAUDE_BACKUP_DIR}-{name} / ${CODEX_BACKUP_DIR}-{name}.
-# The primary CLAUDE_HOME/CODEX_HOME is always backed up regardless.
+# Native default sources are included unless explicitly disabled.
 # For opencode the path is a profile ROOT containing share/config/state
 # subdirs (the wrapper sets XDG_DATA_HOME=$root/share, XDG_CONFIG_HOME=$root/config,
 # XDG_STATE_HOME=$root/state, so opencode config lives at $root/config/opencode —
@@ -53,13 +72,76 @@ CLAUDE_PROFILES="${CLAUDE_PROFILES:-}"
 CODEX_PROFILES="${CODEX_PROFILES:-}"
 OPENCODE_PROFILES="${OPENCODE_PROFILES:-}"
 DSH_PROFILES="${DSH_PROFILES:-}"
-DSH_INCLUDE_DEFAULT="${DSH_INCLUDE_DEFAULT:-auto}"
+DSH_INCLUDE_DEFAULT="${DSH_INCLUDE_DEFAULT:-${BACKUP_INCLUDE_DEFAULT:-auto}}"
+CURSOR_PROFILES="${CURSOR_PROFILES:-}"
 CURSOR_HOME="${CURSOR_HOME:-$HOME/.cursor}"
 # Cursor IDE user dir (Linux default; macOS: $HOME/Library/Application Support/Cursor/User)
 CURSOR_USER_DIR="${CURSOR_USER_DIR:-$HOME/.config/Cursor/User}"
 
 # Log
 BACKUP_LOG="${BACKUP_LOG:-$HOME/.local/log/backup.log}"
+
+# A repository can opt out of every implicit native source with one setting.
+# Per-harness selections can opt back in. Legacy defaults remain unchanged.
+for harness in OPENCLAW CLAUDE CODEX OPENCODE CURSOR; do
+  variable="${harness}_INCLUDE_DEFAULT"
+  printf -v "$variable" '%s' "${!variable:-${BACKUP_INCLUDE_DEFAULT:-true}}"
+done
+for variable in BACKUP_INCLUDE_DEFAULT OPENCLAW_INCLUDE_DEFAULT CLAUDE_INCLUDE_DEFAULT CODEX_INCLUDE_DEFAULT OPENCODE_INCLUDE_DEFAULT CURSOR_INCLUDE_DEFAULT DSH_INCLUDE_DEFAULT; do
+  [[ -v "$variable" ]] || continue
+  case "${!variable}" in
+    true|yes|1|false|no|0) ;;
+    auto) [[ "$variable" == DSH_INCLUDE_DEFAULT ]] || { printf 'ERROR: invalid %s\n' "$variable" >&2; exit 1; } ;;
+    *) printf 'ERROR: invalid %s\n' "$variable" >&2; exit 1 ;;
+  esac
+done
+include_default() {
+  local variable="${1}_INCLUDE_DEFAULT"
+  [[ "${!variable}" == true || "${!variable}" == yes || "${!variable}" == 1 ]]
+}
+
+validate_cursor_selection() {
+  local entry label path seen=$'\n' project selection resolved existing
+  local -a roots=()
+  if [[ -n "$CURSOR_PROFILES" ]] && include_default CURSOR; then
+    roots+=("$(realpath -m -- "$CURSOR_HOME")")
+  fi
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    label=${entry%%:*}; path=${entry#*:}
+    if [[ ! "$label" =~ ^[a-z0-9][a-z0-9_-]*$ || "$label" == default || "$path" != /* || "$path" == / || "$path" == "$HOME" || "$path/" == */../* || "$path/" == */./* || "$seen" == *$'\n'"$label"$'\n'* ]]; then
+      printf 'ERROR: invalid or duplicate Cursor profile\n' >&2; exit 1
+    fi
+    resolved=$(realpath -m -- "$path")
+    [[ "$resolved" != / && "$resolved" != "$(realpath -m -- "$HOME")" ]] || { printf 'ERROR: unsafe Cursor profile root\n' >&2; exit 1; }
+    for existing in "${roots[@]}"; do
+      if [[ "$resolved/" == "$existing/"* || "$existing/" == "$resolved/"* ]]; then
+        printf 'ERROR: overlapping Cursor profile roots\n' >&2; exit 1
+      fi
+    done
+    roots+=("$resolved")
+    seen+="$label"$'\n'
+  done <<< "$CURSOR_PROFILES"
+  for label in "${!CURSOR_PROJECT_ALLOWLIST[@]}"; do
+    [[ "$label" == default || "$seen" == *$'\n'"$label"$'\n'* ]] || { printf 'ERROR: Cursor allowlist has no matching profile\n' >&2; exit 1; }
+    selection=${CURSOR_PROJECT_ALLOWLIST[$label]}
+    [[ -n "$selection" ]] || { printf 'ERROR: empty Cursor project allowlist\n' >&2; exit 1; }
+    while IFS= read -r project; do
+      [[ -n "$project" && "$project" != . && "$project" != .. && "$project" != */* && "$project" != *[\*\?\[\]]* ]] || { printf 'ERROR: Cursor allowlist requires literal project directory names\n' >&2; exit 1; }
+    done <<< "$selection"
+  done
+}
+validate_cursor_selection
+if [[ "$check_only" == true ]]; then
+  printf 'OK: backup configuration loaded; default source selection validated\n'
+  for harness in OPENCLAW CLAUDE CODEX OPENCODE DSH CURSOR; do
+    variable="${harness}_INCLUDE_DEFAULT"
+    printf '%s=%s\n' "$variable" "${!variable}"
+    variable="${harness}_PROFILES"
+    [[ -z "${!variable:-}" ]] || printf '%s=%s\n' "$variable" "${!variable}"
+  done
+  exit 0
+fi
 
 # Initialize log
 mkdir -p "$(dirname "$BACKUP_LOG")"
@@ -194,7 +276,7 @@ backup_claude_dir() {
 }
 
 backup_claude() {
-  backup_claude_dir "default" "$CLAUDE_HOME" "$CLAUDE_BACKUP_DIR"
+  include_default CLAUDE && backup_claude_dir "default" "$CLAUDE_HOME" "$CLAUDE_BACKUP_DIR"
 
   local entry name path
   for entry in $CLAUDE_PROFILES; do
@@ -254,7 +336,7 @@ backup_codex_dir() {
 }
 
 backup_codex() {
-  backup_codex_dir "default" "$CODEX_HOME" "$CODEX_BACKUP_DIR"
+  include_default CODEX && backup_codex_dir "default" "$CODEX_HOME" "$CODEX_BACKUP_DIR"
 
   local entry name path
   for entry in $CODEX_PROFILES; do
@@ -355,7 +437,7 @@ backup_opencode_dir() {
 }
 
 backup_opencode() {
-  backup_opencode_dir "default" "$OPENCODE_DATA_DIR" "$OPENCODE_CONFIG_SRC" "$OPENCODE_STATE_DIR" "$OPENCODE_BACKUP_DIR"
+  include_default OPENCODE && backup_opencode_dir "default" "$OPENCODE_DATA_DIR" "$OPENCODE_CONFIG_SRC" "$OPENCODE_STATE_DIR" "$OPENCODE_BACKUP_DIR"
 
   local entry name root
   for entry in $OPENCODE_PROFILES; do
@@ -507,36 +589,55 @@ backup_dsh() {
 # ============================================================================
 # Cursor Backup
 # ============================================================================
+backup_cursor_dir() {
+  local label=$1 src_home=$2 dst_root=$3 user_dir=${4:-}
+  local projects_src="$src_home/projects" projects_dst="$dst_root/projects" project source destination resolved_source resolved_destination
+  log "=== Cursor Backup ($label) ==="
+  if [[ -d "$projects_src" ]]; then
+    if [[ "$label" != default || -v 'CURSOR_PROJECT_ALLOWLIST[$label]' ]]; then
+      resolved_source=$(realpath -m -- "$projects_src")
+      resolved_destination=$(realpath -m -- "$dst_root")
+      if [[ -L "$dst_root" || -L "$projects_dst" || "$resolved_destination/" == "$resolved_source/"* || "$resolved_source/" == "$resolved_destination/"* ]]; then
+        log 'ERROR: Cursor source and destination overlap or destination is redirected'
+        BACKUP_FAILURES=$((BACKUP_FAILURES + 1)); return
+      fi
+    fi
+    if [[ -v 'CURSOR_PROJECT_ALLOWLIST[$label]' ]]; then
+      while IFS= read -r project; do
+        source="$projects_src/$project"; destination="$projects_dst/$project"
+        if [[ ! -d "$source" || -L "$source" || -L "$destination" ]]; then
+          log 'ERROR: selected Cursor project is missing or redirected'
+          BACKUP_FAILURES=$((BACKUP_FAILURES + 1)); continue
+        fi
+        mkdir -p "$destination"
+        rsync -a --update --exclude="node_modules" "$source/" "$destination/"
+      done <<< "${CURSOR_PROJECT_ALLOWLIST[$label]}"
+    else
+      mkdir -p "$projects_dst"
+      rsync -a --update --exclude="node_modules" "$projects_src/" "$projects_dst/"
+    fi
+    BACKED_UP_TOOLS+=("Cursor ($label)")
+  elif [[ -v 'CURSOR_PROJECT_ALLOWLIST[$label]' ]]; then
+    log 'ERROR: selected Cursor project root is missing'
+    BACKUP_FAILURES=$((BACKUP_FAILURES + 1))
+  else
+    log 'Cursor projects not installed (skipped)'
+  fi
+  # Only the explicitly selected native IDE settings file; never CLI auth stores.
+  if [[ -n "$user_dir" && -f "$user_dir/settings.json" ]]; then
+    mkdir -p "$dst_root/config"
+    rsync -a --update "$user_dir/settings.json" "$dst_root/config/"
+  fi
+}
+
 backup_cursor() {
-  log "=== Cursor Backup ==="
-
-  # Agent transcripts + per-project session state (terminals, canvases, ...)
-  local projects_src="$CURSOR_HOME/projects"
-  local projects_dst="$CURSOR_BACKUP_DIR/projects"
-  if [ -d "$projects_src" ]; then
-    mkdir -p "$projects_dst"
-    rsync -a --update --exclude="node_modules" "$projects_src/" "$projects_dst/"
-    local count=$(find "$projects_src" -path "*/agent-transcripts/*" -name "*.jsonl" 2>/dev/null | wc -l)
-    log "  Projects: $count transcript files → $projects_dst"
-  else
-    log "  Projects: source not found ($projects_src)"
-  fi
-
-  # Settings
-  local settings_src="$CURSOR_USER_DIR/settings.json"
-  local settings_dst="$CURSOR_BACKUP_DIR/config"
-  if [ -f "$settings_src" ]; then
-    mkdir -p "$settings_dst"
-    rsync -a --update "$settings_src" "$settings_dst/"
-    log "  Settings: settings.json → $settings_dst"
-  fi
-
-  if [ -d "$projects_src" ]; then
-    log "  Cursor backup completed"
-    BACKED_UP_TOOLS+=("Cursor")
-  else
-    log "  Cursor not installed (skipped)"
-  fi
+  local entry label path
+  include_default CURSOR && backup_cursor_dir default "$CURSOR_HOME" "$CURSOR_BACKUP_DIR" "$CURSOR_USER_DIR"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    label=${entry%%:*}; path=${entry#*:}
+    backup_cursor_dir "$label" "$path" "${CURSOR_BACKUP_DIR}-${label}"
+  done <<< "$CURSOR_PROFILES"
 }
 
 # ============================================================================
@@ -556,7 +657,7 @@ main() {
   [ -n "$OPENCODE_PROFILES" ] && log "  opencode profiles: $OPENCODE_PROFILES"
   [ -n "$DSH_PROFILES" ]      && log "  DSH profiles configured"
 
-  backup_openclaw
+  include_default OPENCLAW && backup_openclaw
   backup_claude
   backup_codex
   backup_opencode
