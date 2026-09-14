@@ -1,6 +1,6 @@
 ---
 name: data-pipeline
-description: Run and inspect repository-owned data jobs through a zero-argument scheduled entry. Use for explicit node assignments, schedules, input and output dependencies, ownership checks, and migration from command-heavy cron entries; configured processing and publication commands retain their own behavior.
+description: Run and inspect repository-owned data jobs through a backward-compatible default or explicit profile entry. Use for explicit node assignments, schedules, input and output dependencies, ownership checks, and migration from command-heavy cron entries; configured processing and publication commands retain their own behavior.
 ---
 
 # Repository-owned data pipelines
@@ -9,12 +9,21 @@ This package owns scheduling and dispatch. Each configured command owns its
 actual reading, transformation, credentials, cleanup and publication. Invoke
 commands through their executable interfaces; do not import sibling Skills.
 
-Use `scripts/run` as the periodic trigger, with no arguments. It reads
-`~/.config/data-pipeline/config.json` (or the normal XDG equivalent), which must
-resolve to a node selector inside the consumer repository. That selector names
-one node in the shared repository catalog. Never infer a node, account or source
-permission from the hostname or a profile label. The cron entry only supplies a
-clock pulse; all job selection, schedules and environment belong in the catalog.
+Use `scripts/run` as the periodic trigger. With no arguments it continues to
+read `~/.config/data-pipeline/config.json` (or the normal XDG equivalent), so
+existing cron entries work unchanged. For multiple repositories under one
+account, use `scripts/run --profile NAME` to select
+`~/.config/data-pipeline/profiles/NAME.json`; `--config PATH` remains supported.
+The two selection options are mutually exclusive. Each installed selection is
+a symlink to a node selector inside its consumer repository. No mode discovers
+or runs other profiles, and a missing selection fails without falling back.
+
+A selector names one node in its repository catalog. Profile names are opaque
+local aliases, not node identities or source permissions. Never infer a node,
+account or source permission from the hostname or a profile label. Cron supplies
+a clock pulse and optional configuration selection; job selection, schedules
+and environment belong in the catalog. Read the configuration reference for
+installation and gradual migration without changing existing defaults.
 
 Read [configuration.md](references/configuration.md) when configuring or
 migrating jobs. Keep actual accounts, paths, schedules, source selections and

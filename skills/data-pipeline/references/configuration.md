@@ -1,5 +1,7 @@
 # Configuration and run records
 
+## Default and named profiles
+
 The installed selector is a symlink, not a copied job configuration:
 
 ```json
@@ -10,6 +12,53 @@ The installed selector is a symlink, not a copied job configuration:
 contains `schema: data-pipeline/v1`, `repository` (relative to the catalog),
 `state_directory`, `environment`, `nodes`, `resources`, and `jobs`.
 Both selector and catalog must reside inside `repository`.
+
+Selection is explicit and backward compatible:
+
+| Invocation | Selected file below `$XDG_CONFIG_HOME/data-pipeline` |
+| --- | --- |
+| `scripts/run` | `config.json`, the unchanged default |
+| `scripts/run --profile example` | `profiles/example.json` |
+| `scripts/run --config /absolute/selector.json` | The supplied selector, independent of installed links |
+
+When `XDG_CONFIG_HOME` is unset, the base is `~/.config`. `--profile` and
+`--config` are mutually exclusive and work with `--plan`, `--doctor`, `--run JOB`
+and scheduled execution. Profile names start with an ASCII letter or digit and
+contain only ASCII letters, digits, `_`, `.` or `-`; they are aliases, not paths.
+An absent or invalid named profile fails even when the default exists. Without
+a default, a no-argument invocation fails even if exactly one named profile is
+installed. No invocation enumerates profiles or schedules all repositories.
+
+A single-repository machine can keep only its existing `config.json` link.
+For multiple repositories, install additional links such as
+`profiles/example.json` to each repository's selected node file. The optional
+`runtime-install` Skill can manage these through its existing `profiles`
+source/destination entries. Keep the current default link in place while
+adding named links; no catalog schema or installed-default migration is needed.
+Each repository owns its catalog and processing configuration. Give separate
+catalogs separate state directories and logs; job IDs need only be unique within
+a catalog. Profile selection does not namespace or move existing state files.
+Output ownership is checked within the selected catalog, not across separately
+invoked profiles; those profiles must retain their writers' scope enforcement.
+
+Upgrade the public package first. Old zero-argument cron entries continue using
+the same default. Nodes can then migrate independently:
+
+1. Add a named link to the same repository node selector as the default.
+2. Compare `scripts/run --plan` with `scripts/run --profile example --plan`, then
+   check `scripts/run --profile example --doctor` on that node.
+3. Replace that consumer's existing trigger with
+   `scripts/run --profile example` using its managed cron configuration. Keep
+   the default link until its remaining callers have explicitly migrated.
+
+Default, named and explicit-path invocations of the same catalog use its same
+job locks and attempt records. Switching entry syntax preserves in-flight locks
+and minute deduplication. Schedule an additional repository only through its
+own explicitly authorized trigger. The cron installer needs no new format:
+its existing `argv` array can hold the executable, `--profile`, and the name.
+Rollback restores the previous trigger; the preserved default still works.
+
+## Catalog resources and jobs
 
 Each node defines a `timezone` (IANA name) and optional `environment`. Job
 arguments and environment expand `$NAME` or `${NAME}` strictly. Built-ins are

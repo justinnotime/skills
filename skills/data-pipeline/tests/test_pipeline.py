@@ -279,3 +279,163 @@ def test_timeout_also_stops_descendant_after_wrapper_exits(tmp_path):
     import time
     time.sleep(1)
     assert not (repo / "escaped-timeout").exists()
+
+
+@pytest.fixture
+def profiles(tmp_path):
+    first = tmp_path / 'first'
+    second = tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    repo, home, selector, catalog, save = make_config(first)
+    other, _, other_selector, other_catalog, other_save = make_config(second)
+    other_catalog['state_directory'] = '$HOME/other-state'
+    other_catalog['jobs'][0]['log'] = '$HOME/other-job.log'
+    other_save()
+    installed = home / '.config/data-pipeline'
+    (installed / 'profiles').mkdir(parents=True)
+    (installed / 'config.json').symlink_to(selector)
+    (installed / 'profiles/alpha.json').symlink_to(selector)
+    (installed / 'profiles/beta.json').symlink_to(other_selector)
+    runtime = tmp_path / 'isolated-skill'
+    package = Path(__file__).resolve().parents[1]
+    shutil.copytree(package / 'src', runtime / 'src')
+    shutil.copytree(package / 'scripts', runtime / 'scripts')
+
+    def run(*args, environment=None):
+        return subprocess.run(
+            [str(runtime / 'scripts/run'), *args],
+            env={'HOME': str(home), 'PATH': '/usr/bin:/bin', **(environment or {})},
+            text=True, capture_output=True,
+        )
+
+    return repo, other, home, selector, installed, run
+
+
+def test_existing_default_ignores_named_profiles_and_their_failures(profiles):
+    repo, other, home, selector, installed, run = profiles
+    (installed / 'profiles/beta.json').unlink()
+    (installed / 'profiles/beta.json').write_text('invalid JSON')
+    result = run()
+    assert result.returncode == 0, result.stderr
+    assert (repo / 'output').read_text() == 'x'
+    assert not (other / 'output').exists()
+    assert not (home / 'other-state').exists()
+
+
+@pytest.mark.parametrize('arguments', [[], ['--run', 'produce']])
+def test_named_profile_runs_only_its_repository(profiles, arguments):
+    repo, other, home, selector, installed, run = profiles
+    result = run('--profile', 'beta', *arguments)
+    assert result.returncode == 0, result.stderr
+    assert (other / 'output').read_text() == 'x'
+    assert not (repo / 'output').exists()
+    assert not (home / 'state').exists()
+    record = json.loads((home / 'other-state/produce.json').read_text())
+    assert record['status'] == 'ok'
+    assert (home / 'other-job.log').exists()
+
+
+@pytest.mark.parametrize('mode', ['--plan', '--doctor'])
+def test_profile_inspection_and_explicit_config_remain_read_only(profiles, mode):
+    repo, other, home, selector, installed, run = profiles
+    results = [run(mode), run('--profile', 'alpha', mode),
+               run('--config', str(selector), mode)]
+    for result in results:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == json.loads(results[0].stdout)
+    assert not (repo / 'output').exists()
+    assert not (other / 'output').exists()
+    assert not (home / 'state').exists()
+    assert not (home / 'job.log').exists()
+
+
+def test_xdg_profile_selection_does_not_change_default_home_selection(profiles, tmp_path):
+    repo, other, home, selector, installed, run = profiles
+    xdg = tmp_path / 'alternate config'
+    (xdg / 'data-pipeline/profiles').mkdir(parents=True)
+    target = (installed / 'profiles/beta.json').resolve()
+    (xdg / 'data-pipeline/config.json').symlink_to(target)
+    (xdg / 'data-pipeline/profiles/alpha.json').symlink_to(target)
+    for arguments in ([], ['--profile', 'alpha']):
+        result = run(*arguments, '--plan', environment={'XDG_CONFIG_HOME': str(xdg)})
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)['repository'] == str(other)
+    result = run('--profile', 'alpha', '--plan')
+    assert json.loads(result.stdout)['repository'] == str(repo)
+    result = run('--config', str(selector), '--plan',
+                 environment={'XDG_CONFIG_HOME': str(xdg)})
+    assert json.loads(result.stdout)['repository'] == str(repo)
+
+
+@pytest.mark.parametrize('name', ['missing', '', '../config', '/tmp/selector',
+                                 'a/b', '.', '..', 'a\\b', 'two words'])
+def test_bad_or_missing_profile_never_falls_back_to_default(profiles, name):
+    repo, other, home, selector, installed, run = profiles
+    result = run('--profile', name)
+    assert result.returncode == 2, result.stderr
+    assert not (repo / 'output').exists()
+    assert not (other / 'output').exists()
+    assert not (home / 'state').exists()
+    assert not (home / 'other-state').exists()
+
+
+def test_selection_options_are_mutually_exclusive(profiles):
+    repo, other, home, selector, installed, run = profiles
+    result = run('--profile', 'beta', '--config', str(selector))
+    assert result.returncode == 2
+    assert not (repo / 'output').exists()
+    assert not (other / 'output').exists()
+
+
+def test_missing_default_does_not_select_the_only_named_profile(profiles):
+    repo, other, home, selector, installed, run = profiles
+    (installed / 'config.json').unlink()
+    (installed / 'profiles/beta.json').unlink()
+    assert run().returncode == 2
+    assert not (repo / 'output').exists()
+    assert run('--profile', 'alpha').returncode == 0
+    assert (repo / 'output').read_text() == 'x'
+
+
+def test_named_profile_cannot_replace_repository_selector_with_external_copy(profiles):
+    repo, other, home, selector, installed, run = profiles
+    catalog = json.loads(selector.read_text())
+    catalog['catalog'] = str(repo / 'config/pipelines.json')
+    path = installed / 'profiles/alpha.json'
+    path.unlink()
+    path.write_text(json.dumps(catalog))
+    result = run('--profile', 'alpha')
+    assert result.returncode == 2
+    assert 'inside the repository' in result.stderr
+    assert not (repo / 'output').exists()
+
+
+def test_default_and_explicit_profile_share_existing_attempts_and_locks(profiles, monkeypatch):
+    import data_pipeline
+
+    repo, other, home, selector, installed, run = profiles
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
+    monkeypatch.setattr(data_pipeline, 'datetime', Clock)
+    assert data_pipeline.main([]) == 0
+    record = home / 'state/produce.json'
+    original = record.read_bytes()
+    for arguments in (['--profile', 'alpha'], ['--config', str(selector)]):
+        assert data_pipeline.main(arguments) == 0
+        assert record.read_bytes() == original
+        assert (repo / 'output').read_text() == 'x'
+    # Explicit runs bypass the minute check, but must still use the original lock.
+    with data_pipeline.locked(home / 'state/produce.lock'):
+        assert data_pipeline.main(['--profile', 'alpha', '--run', 'produce']) == 0
+        assert record.read_bytes() == original
+        assert (repo / 'output').read_text() == 'x'
+    assert data_pipeline.main(['--profile', 'beta']) == 0
+    assert (other / 'output').read_text() == 'x'
+    assert (home / 'other-state/produce.json').exists()

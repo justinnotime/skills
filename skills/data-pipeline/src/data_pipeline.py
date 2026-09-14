@@ -418,11 +418,17 @@ def execute(job, at, force=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    default = (
+    config_directory = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-        / "data-pipeline/config.json"
+        / "data-pipeline"
     )
-    parser.add_argument("--config", type=Path, default=default)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--config", type=Path, help="explicit repository node selector path"
+    )
+    selection.add_argument(
+        "--profile", metavar="NAME", help="select data-pipeline/profiles/NAME.json"
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--plan",
@@ -439,7 +445,15 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     try:
-        config = load(args.config)
+        selector = args.config or config_directory / "config.json"
+        if args.profile is not None:
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", args.profile):
+                raise Invalid(
+                    "profile must start with a letter or digit and contain only "
+                    "letters, digits, underscores, dots or hyphens"
+                )
+            selector = config_directory / "profiles" / (args.profile + ".json")
+        config = load(selector)
         local = [job for job in config["jobs"] if job["node"] == config["node"]]
         if args.plan:
             print(json.dumps(config, indent=2))
