@@ -23,6 +23,32 @@ misconfiguration, not hostile commands in that file.
 The scripts require Bash 4+, Git, rsync, and a `realpath` implementation with
 GNU-compatible `-m` and `-s` options.
 
+## Install generated OpenCode configuration
+
+Use `scripts/install-opencode-config --input FILE --check`, then remove
+`--check` to install an explicitly selected generated JSON configuration.
+The command requires Python 3.10+ and uses native XDG config/data directories.
+For another configured root, pass `--profile-root /absolute/root`; for explicit
+native locations, pass both `--config-dir DIR --data-dir DIR`. These modes do
+not discover profiles or copy another profile's authentication.
+
+Literal `provider.*.options.apiKey` values move to that root's native
+`auth.json` before credential-free `opencode.json` is installed. Native
+`{env:...}` and `{file:...}` references remain references. Unrelated auth entries
+are preserved; writes are atomic and mode 0600. A config replacement failure
+restores the previous auth file. Concurrent imports share a local lock; native
+OpenCode login does not use that lock, so avoid simultaneous credential edits.
+Symlink destinations, overlapping config/data directories, malformed input and
+repeated occurrences of selected keys are refused without printing key values.
+
+Generate into a private temporary directory outside Git and replicated backup
+roots, then call this command. `--input -` accepts JSON on stdin; never pass a
+key on argv. `--check` creates no files. This handles generated JSON provider
+keys, not arbitrary headers, MCP credentials or JSONC, and does not validate
+credentials against the provider. Keep other credentials in their native stores.
+For new nodes, restore settings and authenticate separately instead of cloning
+another node's native credential directory.
+
 ## Install or update
 
 Inspect the current config, generated launchers, links, and shell functions.
@@ -125,3 +151,4 @@ executable permission without reading its source or managing its checkout.
 After changing this Skill, run `bash tests/run.sh` from this directory and the
 Skill Creator validator against this directory. Tests use a synthetic external
 command and require no sibling Skill packages.
+For configuration import also run `python3 -B -m unittest discover -s tests -v`.

@@ -98,6 +98,12 @@ Each job has:
   five-field cron expression. Lists, ranges and positive steps are supported.
   Sunday is 0 or 7. Restricted month-day and week-day use normal cron OR behavior.
 - `argv`: literal strings; the first is an absolute executable. No implicit shell.
+  Alternatively, `commands` is a nonempty list of such argument arrays. Specify
+  exactly one form. Commands run sequentially with the same cwd/environment,
+  existing job lock and one total `timeout_seconds` budget. Failure, timeout or
+  spawn error prevents later commands. All executable paths are checked before
+  the first command runs. Records include the one-based `command_index` and
+  `completed_commands`; no command arguments are copied into run records.
 - `inputs`, `dependencies`: resource IDs, including transitive file dependencies.
 - `outputs`: objects naming a `resource`, optionally `partitions` (strings) or
   `partitions_from` (the same file/pointer reference shape). Partitioned resources
@@ -128,3 +134,17 @@ native publication evidence. An installer should preserve unrelated jobs. Restor
 the old entries and matching configuration together for rollback; never leave
 both old and new triggers active. A node reassignment also requires disabling
 that job on its previous node; local file locks are not distributed leases.
+
+For example, replace a fetch-and-publish shell wrapper with native commands:
+
+```json
+{"commands": [
+  ["/usr/bin/git", "-C", "$HOME/src/example", "fetch", "origin"],
+  ["/usr/bin/git", "-C", "$HOME/src/example", "push", "mirror", "refs/remotes/origin/main:refs/heads/main"]
+]}
+```
+
+Retain the caller's chosen ref and overwrite policy; the runner does not add a
+force flag. Test an actual nonzero upstream result and assert that no downstream
+write occurred. A wrapper returning success after a failed subprocess remains a
+wrapper defect; sequence execution cannot recover an error the command erased.

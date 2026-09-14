@@ -120,6 +120,81 @@ def test_job_failure_is_recorded_and_next_schedule_retries(tmp_path):
     assert execute(job, at.replace(minute=1))["status"] == "ok"
 
 
+@pytest.mark.parametrize("failure_at", [0, 1, 2])
+def test_native_command_failure_stops_all_later_commands(tmp_path, failure_at):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    job_config = catalog["jobs"][0]
+    del job_config["argv"]
+    job_config["commands"] = [
+        [sys.executable, "-c", f"from pathlib import Path; Path('step-{i}').touch(); raise SystemExit({17 if i == failure_at else 0})"]
+        for i in range(3)
+    ]
+    job = save()["jobs"][0]
+    result = execute(job, datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert (result["status"], result["returncode"]) == ("failed", 17)
+    assert result["command_index"] == failure_at + 1
+    assert result["completed_commands"] == failure_at
+    assert {p.name for p in repo.glob("step-*")} == {f"step-{i}" for i in range(failure_at + 1)}
+    assert json.loads((home / "state/produce.json").read_text()) == result
+
+
+def test_commands_share_environment_order_and_attempt_lock(tmp_path):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    config = catalog["jobs"][0]
+    first = config.pop("argv")
+    config["commands"] = [first, first]
+    job = save()["jobs"][0]
+    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    result = execute(job, at)
+    assert result["status"] == "ok" and result["completed_commands"] == 2
+    assert (repo / "output").read_text() == "xx"
+    assert execute(job, at)["status"] == "already-attempted"
+    assert (repo / "output").read_text() == "xx"
+
+
+def test_all_command_executables_are_checked_before_first_write(tmp_path):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    config = catalog["jobs"][0]
+    config["commands"] = [config.pop("argv"), ["/does-not-exist/fetch"]]
+    result = execute(save()["jobs"][0], datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert result["status"] == "failed"
+    assert not (repo / "output").exists()
+
+
+def test_command_sequence_shares_one_total_timeout(tmp_path):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    config = catalog["jobs"][0]
+    del config["argv"]
+    config["timeout_seconds"] = .4
+    config["commands"] = [
+        [sys.executable, "-c", "import time; time.sleep(.25)"],
+        [sys.executable, "-c", "import time; time.sleep(.25)"],
+        [sys.executable, "-c", "from pathlib import Path; Path('published').touch()"],
+    ]
+    result = execute(save()["jobs"][0], datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert result["status"] == "failed" and result["error"] == "timeout"
+    assert result["completed_commands"] == 1
+    assert "returncode" not in result
+    assert not (repo / "published").exists()
+
+
+@pytest.mark.parametrize("commands", [[], "false", [[]], ["/usr/bin/true"], [["relative-command"]]])
+def test_invalid_command_sequences_are_rejected(tmp_path, commands):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    config = catalog["jobs"][0]
+    del config["argv"]
+    config["commands"] = commands
+    with pytest.raises(Invalid):
+        save()
+
+
+def test_argv_and_commands_cannot_compete(tmp_path):
+    repo, home, selector, catalog, save = make_config(tmp_path)
+    catalog["jobs"][0]["commands"] = [[sys.executable, "-c", "pass"]]
+    with pytest.raises(Invalid, match="exactly one"):
+        save()
+
+
 def test_timeout_stops_command_and_releases_lock(tmp_path):
     repo, home, selector, catalog, save = make_config(tmp_path)
     (repo / "writer.py").write_text("import time\ntime.sleep(60)\n")

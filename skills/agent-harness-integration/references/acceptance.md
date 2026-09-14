@@ -28,6 +28,9 @@ is not a lossless backup.
 | Existing launcher, alias or function | Preserved or deliberately migrated; installation does not silently shadow it |
 | Skill discovery in each selected root | The running harness can discover the intended canonical package, not just a filesystem link |
 | Private config under changed XDG | Child commands select the intended shared or isolated configuration |
+| Generated settings and refresh | Both initial install and normal refresh keep literal keys out of the settings copy; native auth remains usable and unrelated credentials are preserved |
+| Backup and fresh-node restore | Selected settings/state restore without native auth; a synthetic credential sentinel is absent from backed-up config and diagnostics |
+| Existing non-secret config copy | Installed selection resolves to the single repository authority; divergent content is reviewed before replacing a regular file |
 | Two same-directory conversations | No bus identity theft, cross-conversation presentation or extraction collision |
 | Resume and terminal rename | Stable selected identity; restart does not register a different inbox accidentally |
 | Named ORC fleet | Registration, tasks, acknowledgment and turn reporting use the same store |
@@ -47,6 +50,8 @@ is not a lossless backup.
 | Downstream selection | New history is selected by summaries and human prompts by learning readers |
 | Publication interruption | Durable progress advances only after successful publication; recovery retains completed work |
 | Scheduler environment | Actual scheduled command works with its minimal PATH/configuration and existing locks |
+| Upstream command fails or times out | No later transform/push runs; first failed command and nonzero result are visible; previous published state remains |
+| Node/profile expansion | Independent roots and source identities stay independent; known formats reuse the same runtime; no duplicate schedule is introduced |
 
 Not every harness supports every case. Record unsupported capabilities against
 the caller's requirements rather than claiming a generic full integration.
