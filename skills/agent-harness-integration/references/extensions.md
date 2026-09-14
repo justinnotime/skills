@@ -1,7 +1,14 @@
-# Extending by node, harness and profile
+# The harness × node × profile model
 
 Keep the existing owners and native formats. These dimensions compose; they do
 not require a new central registry or one script per node/harness/profile tuple.
+
+A **harness** is a native application and its formats/interfaces. A **node** is
+an explicitly selected deployment context, usually a machine/account home. A
+**harness profile** selects an instance's roots and executable on that node.
+Labels can repeat across unrelated harnesses or nodes; they are not global
+session identities. Only configured combinations exist: this model does not
+enable the full Cartesian product or promise every native capability.
 
 | Extension | Change at its existing authority | Reuse unchanged |
 |---|---|---|
@@ -10,9 +17,58 @@ not require a new central registry or one script per node/harness/profile tuple.
 | Profile: another selected instance of a supported harness | Explicit root, executable override if required, credential reference, permitted sources and output identity | The same harness adapter and node schedule; extend an existing source list |
 
 A harness profile selects native roots; a data-pipeline profile is a local alias
-for a repository's node selector. Neither implies an account or grants source
-access. A new combination requires no runtime changes when its formats and
-capabilities are already supported. Add code only for an actual new behavior.
+for a repository's node selector. A Skill's private `profile.md` is caller
+guidance. These are separate uses of the word profile; none implies an account
+or grants source access. A new combination requires no runtime changes when
+its formats and capabilities are already supported. Add code only for an actual
+new behavior, including an unsupported platform or native interface.
+
+## How the mechanisms compose
+
+The [owning Skills](../SKILL.md#use-existing-owners) retain their own native
+configuration. The integration is the agreement between those selections:
+
+- Launchers select the harness instance; `runtime-install` exposes its selected
+  Skills and private configuration.
+- `state-backup` selects original state and writes the configured backup layout.
+  Replication has its own service and receiving-device checks.
+- `agent-session-extraction` selects authorized live roots, snapshots or mirrors
+  and produces configured histories and raw human prompts. Backup is not a
+  mandatory intermediate for every source, and backup scope grants no read access.
+- `data-pipeline` selects where and when configured commands run. Its catalog
+  declares inputs, dependencies and outputs; processing packages still select
+  what they read. `repository-publish` handles configured Git transactions.
+
+The executing node and a session's origin are different identities. A mirrored
+session retains its original configured identity even when another node reads
+it. Independent origins need distinct output identities when native IDs collide.
+Use the existing output-ownership contract for owners and aggregators; assigning
+another scheduler node must not create a second writer for the same partition.
+
+## Add one dimension
+
+**Node:** select its explicit ID, repository and supported platform; configure
+its paths, environment, dependencies and job assignments. Select only its
+authorized roots, backup destinations, source origins and output ownership.
+Install its configuration/discovery links and existing pipeline trigger with
+`runtime-install`. Verify on that node: paths resolved on another machine are
+not evidence of a usable local deployment. A moved writer requires retirement
+on its former node as part of activation.
+
+**Harness:** inspect its native root, credentials, state consistency, transcript
+format and required discovery/hooks. Extend only missing adapters in the owning
+packages, with package-local synthetic tests; leave supported mechanisms alone.
+Then select a concrete node/profile through private configuration and exercise
+the applicable acceptance path. Another version or mode using the same formats
+may require configuration only. Record unsupported native capabilities explicitly.
+
+**Profile:** select another supported harness instance's roots, executable and
+credential reference in its repository. Extend discovery, backup selection and
+extraction sources independently; select output identity and shared-project
+subtrees explicitly. Extend the existing job's inputs/dependencies and source
+list instead of creating a per-profile cron. Test both the new selection and an
+unselected sibling. A separate repository consumer may select its own pipeline
+profile; that alias is not the harness profile.
 
 ## Repository ownership and shared inputs
 
@@ -81,19 +137,21 @@ assert absence of downstream writes, not only a nonzero final status.
 
 ## Request template
 
-Use this as an onboarding prompt, filling known selections from the caller's
-actual configuration. Ask only for required information that cannot be inferred.
+Invoke `agent-harness-integration` with the owning repository and one concrete
+operation, for example:
 
-> Integrate the selected node, harness and profile using the existing owners.
-> Identify which dimension changed and which native roots and credential source
-> are authorized. Reuse the current runtimes; change private configuration for
-> supported combinations. Keep each repository independent of unselected repositories,
-> and select shared project inputs before scanning. Test a newly added transcript in
-> an unselected profile and a missing selected input. Remove superseded copies and invocations. Keep
-> credentials separate through generation, installation, backup and restore.
-> Run the applicable acceptance cases, including upstream failure with no
-> downstream publication. Report code support, installed configuration, active
-> behavior, exact evidence and any unverified receiving node separately.
+> Add node `<node>` using the existing harnesses and selected profiles.
+
+> Add harness `<harness>` on `<node>` with profile `<profile>`.
+
+> Add profile `<profile>` for `<harness>` on `<node>`.
+
+Supply known roots and permitted source scope; infer existing selections from
+the caller's configuration and ask only for missing decisions. Cover the chosen
+discovery, backup, session/raw-prompt and scheduling capabilities through their
+owners. Report the configuration diff, applicable acceptance evidence and gaps.
+For an existing deployment moving to newer mechanisms, use
+[the upgrade procedure and request](upgrades.md) instead of treating it as a new node.
 
 Keep deployment evidence in the caller's operations records. Derive current
 coverage from those existing configuration authorities; do not maintain a

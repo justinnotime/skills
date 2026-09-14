@@ -19,10 +19,11 @@ For moving an existing implementation into an independent Skill, see the
 configuration, duplicate-code removal, installation and verification on each
 machine.
 
-For adding a harness, profile or machine, start with
-[agent-harness-integration](skills/agent-harness-integration/SKILL.md). It connects
-the existing owners and their acceptance checks without another installer or
-per-harness scheduler.
+For the harness × node × profile model, adding any one dimension, or upgrading
+an existing deployment, start with
+[agent-harness-integration](skills/agent-harness-integration/SKILL.md). It routes
+discovery, backup, session/raw-prompt extraction and scheduling to their existing
+owners, with extension and upgrade procedures and acceptance checks.
 
 ## Repository name transition
 
@@ -59,7 +60,7 @@ reusing that name removes the redirect.
 | `skills/remote-clipboard/` | Remote-to-local clipboard Skill and shell function |
 | `clip.sh` | Stable compatibility link for the clipboard shell helper |
 | `skills/agent-harness-profiles/` | Configuration-driven launcher and Skill-link setup |
-| `skills/agent-harness-integration/` | Cross-mechanism harness onboarding and behavior acceptance |
+| `skills/agent-harness-integration/` | Harness × node × profile extension, deployment upgrades and integration acceptance |
 | `skills/agent-session-extraction/` | Manifest-driven extraction Skill and command wrappers |
 | `skills/github-archive/` | Configured GitHub archives with local issue dependency graphs, timelines and inventories |
 | `skills/teams-archive/` | Caller-configured Teams chat, card, and attachment archive |
