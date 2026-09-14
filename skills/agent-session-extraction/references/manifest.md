@@ -30,8 +30,11 @@ discovery, decoder options, and whether an empty source is authoritative.
 configured resolved path, every candidate lexical path, and every candidate
 resolved path. `symlinks=confined` permits only targets that remain under both
 the configured source and allowed resolved roots. `symlinks=reject` refuses
-any traversal. Use `forbidden_components` and `required_suffixes` as additional
-consumer defenses; they never replace root containment.
+any traversal. Explicit source paths and allowed roots define read authority.
+`forbidden_components` is optional and defaults to an empty list; precise source
+selection does not require a directory-name blacklist. Existing consumers may
+retain explicit exclusions or `required_suffixes`, but neither replaces root
+containment.
 
 The optional `forbidden_component_patterns` array adds case-sensitive shell-style
 patterns such as `excluded-*` for each path component. These patterns apply to

@@ -5,10 +5,14 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from session_test_support import manifest_data, write_manifest
 
 from agent_skills.sessions.manifest import ManifestError, load_manifest
-from agent_skills.sessions.sources import SourceAccessError, validate_configured_path
-from session_test_support import manifest_data, write_manifest
+from agent_skills.sessions.sources import (
+    SourceAccessError,
+    validate_candidate,
+    validate_configured_path,
+)
 
 
 def test_expansion_uses_only_supplied_environment_and_keeps_policy_literals(tmp_path):
@@ -65,3 +69,33 @@ def test_private_manifest_location_policy(tmp_path, inside):
         selected.symlink_to(original)
     with pytest.raises(ManifestError, match="external non-symlink"):
         load_manifest(selected, environ={})
+
+
+def test_explicit_roots_confine_reads_without_a_component_blacklist(tmp_path):
+    source = tmp_path / "selected"
+    source.mkdir()
+    inside = source / "unlisted-name.jsonl"
+    inside.write_text("{}\n")
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}\n")
+    link = source / "linked.jsonl"
+    link.symlink_to(outside)
+    data = manifest_data(source, tmp_path / "output")
+    policy = data["sources"][0]["root_policy"]
+    del policy["forbidden_components"]
+    policy["allowed_lexical_roots"] = [str(source)]
+    policy["allowed_resolved_roots"] = [str(source)]
+    policy["symlinks"] = "confined"
+    schema = json.loads((Path(__file__).parents[1] / "schemas/manifest-v1.json").read_text())
+    jsonschema.validate(data, schema)
+    manifest = load_manifest(write_manifest(tmp_path / "manifest.json", data), environ={})
+    selected = manifest.sources[0]
+    root = validate_configured_path(selected)
+    assert validate_candidate(selected, root, inside)[0] == inside
+    for candidate in (outside, link):
+        with pytest.raises(SourceAccessError, match="outside"):
+            validate_candidate(selected, root, candidate)
+    data["sources"][0]["path"]["value"] = str(outside)
+    manifest = load_manifest(write_manifest(tmp_path / "manifest.json", data), environ={})
+    with pytest.raises(SourceAccessError, match="outside"):
+        validate_configured_path(manifest.sources[0])

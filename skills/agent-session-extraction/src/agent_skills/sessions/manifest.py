@@ -380,7 +380,7 @@ def _root_policy(value: Any) -> RootPolicy:
         "candidate_beneath_root",
         "symlinks",
     }
-    _required(cfg, keys, "source.root_policy")
+    _required(cfg, keys - {"forbidden_components"}, "source.root_policy")
     _only(cfg, keys | {"forbidden_component_patterns"}, "source.root_policy")
     lexical = tuple(
         _absolute(item, "source.root_policy.allowed_lexical_roots[]")
@@ -394,7 +394,7 @@ def _root_policy(value: Any) -> RootPolicy:
             cfg["allowed_resolved_roots"], "allowed_resolved_roots", allow_empty=False
         )
     )
-    forbidden = _string_list(cfg["forbidden_components"], "forbidden_components")
+    forbidden = _string_list(cfg.get("forbidden_components", []), "forbidden_components")
     if any(not item or "/" in item for item in forbidden):
         raise ManifestError("forbidden_components entries must be path components")
     patterns = _string_list(cfg.get("forbidden_component_patterns", []), "forbidden_component_patterns")

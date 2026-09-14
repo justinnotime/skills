@@ -124,7 +124,7 @@
     },
     "rootPolicy": {
       "type": "object", "additionalProperties": false,
-      "required": ["allowed_lexical_roots", "allowed_resolved_roots", "forbidden_components", "required_suffixes", "candidate_beneath_root", "symlinks"],
+      "required": ["allowed_lexical_roots", "allowed_resolved_roots", "required_suffixes", "candidate_beneath_root", "symlinks"],
       "properties": {
         "allowed_lexical_roots": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/absolutePath"}},
         "allowed_resolved_roots": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/absolutePath"}},
