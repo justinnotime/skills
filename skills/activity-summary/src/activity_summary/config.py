@@ -103,6 +103,10 @@ def load(path: str | Path, root: str | Path | None = None) -> dict:
     ):
         facts[key] = relative(facts[key])
         rooted(cfg["repository_root"], facts[key])
+    history_directories = facts.get("document_history_directories", [])
+    if not isinstance(history_directories, list):
+        raise ConfigurationError("invalid_document_history_directories")
+    facts["document_history_directories"] = [relative(item) for item in history_directories]
     facts["commit_directories"] = [
         relative(item.rstrip("/")) for item in facts["commit_directories"]
     ]

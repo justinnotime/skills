@@ -42,6 +42,14 @@ def test_commit_directory_trailing_separator_preserves_legacy_selection(tmp_path
     assert loaded["facts"]["commit_directories"] == ["sources", "knowledge"]
 
 
+@pytest.mark.parametrize("directories", ["sources/old-documents", ["../outside"], [None]])
+def test_document_history_directories_require_relative_path_list(tmp_path, directories):
+    cfg = synthetic_config(tmp_path)
+    cfg["facts"]["document_history_directories"] = directories
+    with pytest.raises(ConfigurationError):
+        load(save(tmp_path, cfg))
+
+
 def test_private_source_labels_and_machine_filters_are_explicit(tmp_path):
     cfg = synthetic_config(tmp_path)
     cfg["facts"].update(

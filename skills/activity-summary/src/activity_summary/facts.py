@@ -702,6 +702,19 @@ def cluster_sessions(repo, T, gap_min):
 
 
 def doc_changes(repo, T):
+    document_prefixes = tuple(
+        sorted(
+            {
+                directory + "/"
+                for directory in [
+                    DOCUMENT_DIRECTORY,
+                    *OPTIONS.get("document_history_directories", []),
+                ]
+            },
+            key=len,
+            reverse=True,
+        )
+    )
     raw = sh(
         [
             "git",
@@ -712,7 +725,7 @@ def doc_changes(repo, T):
             "--name-only",
             "--format=",
             "--",
-            DOCUMENT_DIRECTORY + "/",
+            *document_prefixes,
             WIKI_PROJECT_DIRECTORY + "/",
         ],
         repo,
@@ -722,8 +735,9 @@ def doc_changes(repo, T):
         line = line.strip()
         if not line or line.startswith(SUMMARY_DIRECTORY + "/"):
             continue
-        if line.startswith(DOCUMENT_DIRECTORY + "/"):
-            m = re.search(re.escape(DOCUMENT_DIRECTORY) + r"/([^/]+)/", line)
+        prefix = next((prefix for prefix in document_prefixes if line.startswith(prefix)), None)
+        if prefix:
+            m = re.match(r"([^/]+)/", line[len(prefix) :])
             if m:
                 gdocs[m.group(1)] = gdocs.get(m.group(1), 0) + 1
         elif line.startswith(WIKI_PROJECT_DIRECTORY + "/"):

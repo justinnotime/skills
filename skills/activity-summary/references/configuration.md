@@ -14,6 +14,7 @@ The schema is `activity-summary/v1`. See [example.json](example.json).
 | `facts.issue_directory` | Relative directory of `owner_repo/number.md` GitHub mirrors |
 | `facts.default_issue_repository` | Explicit `owner/repository` used for legacy number-only records and unresolved bare references |
 | `facts.document_directory` | Relative directory with one subdirectory per document mirror |
+| `facts.document_history_directories` | Optional list of previous relative document directories; query their actual Git history after a directory move, without requiring them to exist in the current checkout |
 | `facts.wiki_project_directory` | Relative directory with one subdirectory per project |
 | `facts.commit_directories` | Relative Git history path selections; trailing `/` is accepted |
 | `facts.summary_directory` | Excluded generated-summary path prefix |
@@ -36,6 +37,12 @@ boundaries must still be valid. Git command errors fail extraction rather than
 producing an empty fact set. GitHub activity requires a target-date source
 timestamp in the current mirror or a historical Git blob. Commit/import times
 alone are not evidence of upstream activity.
+
+When moving the document mirror, keep its previous Git paths in
+`document_history_directories`. Document changes from the current and historical
+directories use the same document subdirectory names; old Git paths are not
+rewritten into current filesystem paths. This setting selects history only and
+does not create or read an old mirror directory.
 
 Issue titles are intentionally retained in the fact payload; a later title edit
 can therefore change an older daily hash. Later counters, latest-update times,

@@ -5,8 +5,54 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from conftest import synthetic_config
+
 from activity_summary import facts as MODULE
 from activity_summary import issue_refs as ISSUE_REFS
+from activity_summary.config import activate
+
+
+def test_document_changes_preserve_history_after_directory_move(tmp_path):
+    def git(*args, date=None):
+        env = os.environ.copy()
+        if date:
+            env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        subprocess.run(["git", *args], cwd=tmp_path, env=env, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    old_directory = tmp_path / "sources/old-documents"
+    old_document = old_directory / "example/README.md"
+    old_document.parent.mkdir(parents=True)
+    old_document.write_text("Original document\n")
+    project = tmp_path / "knowledge/projects/example/note.md"
+    project.parent.mkdir(parents=True)
+    project.write_text("Project context\n")
+    git("add", ".")
+    git("commit", "-qm", "add document", date="2024-01-02T12:00:00Z")
+    cfg = synthetic_config(tmp_path)
+    cfg["facts"]["document_directory"] = "sources/old-documents"
+    activate(cfg)
+    before = MODULE.doc_changes(str(tmp_path), "2024-01-02")
+    assert before["google_docs"] == [{"doc": "example", "files_changed": 1}]
+
+    git("mv", "sources/old-documents", "sources/documents")
+    git("commit", "-qm", "move document directory", date="2024-01-03T12:00:00Z")
+    (tmp_path / "sources/documents/example/README.md").write_text("Updated document\n")
+    git("add", ".")
+    git("commit", "-qm", "update document", date="2024-01-04T12:00:00Z")
+    cfg["facts"]["document_directory"] = "sources/documents"
+    activate(cfg)
+    assert MODULE.doc_changes(str(tmp_path), "2024-01-02")["google_docs"] == []
+
+    cfg["facts"]["document_history_directories"] = ["sources/old-documents"]
+    activate(cfg)
+    assert not old_directory.exists()
+    assert MODULE.doc_changes(str(tmp_path), "2024-01-02") == before
+    assert MODULE.doc_changes(str(tmp_path), "2024-01-04")["google_docs"] == [
+        {"doc": "example", "files_changed": 1}
+    ]
 
 
 class DailySummaryExtractTest(unittest.TestCase):
