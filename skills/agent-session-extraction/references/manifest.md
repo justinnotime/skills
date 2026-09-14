@@ -26,6 +26,35 @@ selected native-default path, `owner` or `mirror` authority, required status,
 output node, stable-byte or read-only-SQLite snapshot mode, explicit file/glob
 discovery, decoder options, and whether an empty source is authoritative.
 
+For a shared directory, glob discovery may specify `directories`, a nonempty
+list of literal relative subdirectories. Each must exist and remain confined;
+missing selections fail even with `allow_empty=true`. Patterns are evaluated
+relative to each selected directory. Unselected sibling trees are not traversed,
+read or decoded. Directory symlinks in selected trees are refused before globbing;
+file symlinks into unselected siblings are refused, including during
+open-file revalidation. Omit the field to retain the existing whole-root behavior.
+Do not use a project-output filter as a substitute for selecting input.
+
+```json
+"discovery": {
+  "mode": "glob",
+  "directories": ["srv-project-one", "srv-project-two"],
+  "patterns": ["**/agent-transcripts/**/*.jsonl"]
+}
+```
+
+The outer `path` still defines `source_ref`; adding this list does not rename
+existing sessions or require changing project resolvers. Each source/profile has
+its own list. Existing outputs are governed by the normal cleanup/preservation
+plan; review it before publishing a narrower selection.
+
+Multiple independent roots use separate source entries. Their `output_node`
+values identify stable logical origins: where native session IDs can overlap,
+include an explicit profile distinction. Replicated copies of the same origin
+retain that value. Do not rename already published origins during this change;
+new independent roots can use new origin values. A physical hostname, profile
+label and extraction origin are separate concepts.
+
 `root_policy` checks four values separately: configured lexical path,
 configured resolved path, every candidate lexical path, and every candidate
 resolved path. `symlinks=confined` permits only targets that remain under both

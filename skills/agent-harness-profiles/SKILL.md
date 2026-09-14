@@ -1,6 +1,6 @@
 ---
 name: agent-harness-profiles
-description: Configure or inspect named root-selection launchers for Claude Code, Codex, OpenCode, and DeepSeek Harness. Use for caller-configured roots and executable selection; full onboarding, accounts, discovery, hooks, and backup authorization belong to agent-harness-integration.
+description: Configure or inspect named root-selection launchers for Claude Code, Codex, OpenCode, DeepSeek Harness, and Cursor Agent CLI. Use for caller-configured roots and executable selection; full onboarding, accounts, discovery, hooks, and backup authorization belong to agent-harness-integration.
 ---
 
 # Agent Harness Profiles
@@ -10,11 +10,11 @@ trust, ownership, or machine identity from a label or path. Real names, meanings
 roots, ports, repository choices, and schedules belong in caller-owned
 configuration.
 
-The stable configuration interface is `~/.config/backup/config` and its existing
-`CLAUDE_PROFILES`, `CODEX_PROFILES`, `OPENCODE_PROFILES`, and `DSH_PROFILES`
+The stable configuration interface is `~/.config/backup/config` and its
+`CLAUDE_PROFILES`, `CODEX_PROFILES`, `OPENCODE_PROFILES`, `DSH_PROFILES`, and `CURSOR_PROFILES`
 variables. A private repository may own that file or source a tracked private
 fragment from it. Claude Code, Codex, and OpenCode lists use space-separated
-`label:/absolute/root` entries. DSH uses newline-separated entries and permits
+`label:/absolute/root` entries. DSH and Cursor use newline-separated entries and permit
 spaces inside the path. Labels begin with a lowercase letter or digit and use
 lowercase letters, digits, underscores, or hyphens. Labels have no implied
 account meaning.
@@ -22,6 +22,11 @@ The configuration is trusted local shell code; path checks prevent accidental
 misconfiguration, not hostile commands in that file.
 The scripts require Bash 4+, Git, rsync, and a `realpath` implementation with
 GNU-compatible `-m` and `-s` options.
+
+For repository-independent selections and Cursor's native scope, read
+[repository profiles](references/repository-profiles.md). Use `--config` and a
+separate launcher output per repository; do not make one repository load another
+repository's definitions. Root selection alone does not isolate shared inputs.
 
 ## Install generated OpenCode configuration
 
@@ -80,7 +85,7 @@ commands are unchanged and continue to honor their inherited environment.
 ## Executable selection
 
 For each configured harness, the default executable name is `claude`, `codex`,
-`opencode`, or `dsh` on PATH. If that name is unavailable or not the intended
+`opencode`, `dsh`, or `cursor-agent` on PATH. If that name is unavailable or not the intended
 executable, explicitly configure one absolute executable path per harness:
 
 ```bash
@@ -88,6 +93,7 @@ CLAUDE_COMMAND="/absolute/path/to/claude"
 CODEX_COMMAND="/absolute/path/to/codex"
 OPENCODE_COMMAND="/absolute/path/to/opencode"
 DSH_COMMAND="/absolute/path/to/deepseek-harness"
+CURSOR_COMMAND="/absolute/path/to/cursor-agent"
 ```
 
 These optional values accept neither command strings nor argument lists. They
@@ -105,7 +111,7 @@ label or deliberately resolve the conflict yourself; a command override does not
 bypass name conflicts. Sourcing twice also refuses the existing functions: use a
 fresh shell for a regenerated file rather than silently replacing active functions.
 
-Launchers override only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `DSH_HOME`, or OpenCode's
+Launchers override only `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `DSH_HOME`, `CURSOR_CONFIG_DIR`, or OpenCode's
 three XDG roots for the child command. All other inherited environment, arguments,
 working directory, and the command's exit status are preserved. In particular,
 inherited authentication and explicit OpenCode config overrides are not cleared.

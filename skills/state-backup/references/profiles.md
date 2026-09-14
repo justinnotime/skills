@@ -33,6 +33,7 @@ Additional roots must use the layout produced by the upstream tool:
 | Codex | directory selected by `CODEX_HOME` |
 | opencode | a root containing `share/opencode`, `config/opencode`, and `state/opencode` |
 | DeepSeek Harness | directory selected by `DSH_HOME` |
+| Cursor | explicitly selected root containing `projects/`; CLI configuration selection alone does not prove transcript location |
 
 The state-backup command begins once a source directory exists and never creates
 accounts, shell launchers, application roots, services, or Skill links. The
@@ -70,6 +71,62 @@ lab:$HOME/.dsh-lab"
 DSH labels must begin with a lowercase letter or digit and may then contain
 lowercase letters, digits, underscores, or hyphens. Paths must be absolute.
 The source directory name does not need to match its label.
+
+## Independent repository selection
+
+`backup --config FILE` or `BACKUP_CONFIG=FILE backup` loads only the selected
+trusted shell file. `--config` takes precedence. A missing explicitly selected
+file (including a broken symlink) fails before copying; it never falls back to
+native defaults. With neither override, the legacy default config remains optional.
+The selected file can source a fragment from its own repository, never a fragment
+owned by another repository merely to obtain its own roots.
+
+Set `BACKUP_INCLUDE_DEFAULT=false` for a repository that selects only named roots.
+This disables every implicit native source. Each of `OPENCLAW_INCLUDE_DEFAULT`,
+`CLAUDE_INCLUDE_DEFAULT`, `CODEX_INCLUDE_DEFAULT`, `OPENCODE_INCLUDE_DEFAULT`,
+`CURSOR_INCLUDE_DEFAULT`, and `DSH_INCLUDE_DEFAULT` may override that choice.
+Values are `true`/`yes`/`1` or `false`/`no`/`0`. Without the global setting,
+legacy defaults remain unchanged, including DSH's `auto` behavior. Explicit
+`*_PROFILES` entries are still selected when defaults are disabled.
+
+`backup --config FILE --check` loads configuration, checks default switches and
+Cursor selections, and prints selected defaults/profile roots without copying
+state or creating logs. It does not validate every legacy profile, test source
+readability, validate credentials or prove a successful backup. Use the profile
+doctor for launcher/root checks and run backup to verify selected source behavior.
+Configuration is trusted shell code and can itself have side effects.
+
+## Cursor profile and project selection
+
+The optional Cursor profile/allowlist checks require GNU-compatible `realpath -m`.
+`CURSOR_PROFILES` accepts newline-separated `label:/absolute/root` entries.
+Each root's `projects/` is copied to `cursor-LABEL/projects/`; labels must be
+safe and unique, with `default` reserved for the native source. Roots must be
+disjoint. Additional roots do not inherit the native IDE settings directory or
+copy CLI authentication/configuration files. Native settings retain their existing
+`CURSOR_USER_DIR/settings.json` selection. This backs up project files, not the
+IDE's entire database or every release's CLI session format.
+
+A shared root can select literal project directory names independently for each
+profile. No wildcard, parent path or empty allowlist is accepted:
+
+```bash
+BACKUP_INCLUDE_DEFAULT=false
+CURSOR_INCLUDE_DEFAULT=true
+CURSOR_PROFILES="alpha:$HOME/.cursor-alpha"
+declare -A CURSOR_PROJECT_ALLOWLIST=(
+  [default]="srv-project-one"
+  [alpha]="srv-project-two
+srv-project-three"
+)
+```
+
+An omitted label retains whole-project-root copying for compatibility. An explicit
+list with a missing or redirected project fails; it never broadens to all projects.
+Backup remains incremental: narrowing selection does not remove previously copied
+files. Review old destinations separately before retiring unwanted state. A profile
+root or project label grants no extraction permission; configure extraction's own
+source entry and `discovery.directories` explicitly.
 
 ## DeepSeek Harness default compatibility
 

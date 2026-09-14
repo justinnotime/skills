@@ -51,6 +51,8 @@ is not a lossless backup.
 | Publication interruption | Durable progress advances only after successful publication; recovery retains completed work |
 | Scheduler environment | Actual scheduled command works with its minimal PATH/configuration and existing locks |
 | Upstream command fails or times out | No later transform/push runs; first failed command and nonzero result are visible; previous published state remains |
+| Unselected repository absent | Selected repository launch, backup and extraction still work using its explicit configuration |
+| Shared project input | New matching files and symlinks in unselected profiles never enter selected history or prompts; missing selected directories fail |
 | Node/profile expansion | Independent roots and source identities stay independent; known formats reuse the same runtime; no duplicate schedule is introduced |
 
 Not every harness supports every case. Record unsupported capabilities against

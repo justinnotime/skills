@@ -20,6 +20,7 @@ from .reconcile import clear_failure_marker, write_failure_marker
 from .redact import Redactor
 from .sources import (
     SourceAccessError,
+    discovery_roots,
     session_metadata_source,
     validate_configured_path,
 )
@@ -103,7 +104,9 @@ def doctor(
             sources.append({"id": source.source_id, "status": "disabled"})
             continue
         try:
-            validate_configured_path(source)
+            root = validate_configured_path(source)
+            if source.discovery.directories:
+                discovery_roots(source, root)
             metadata_source = session_metadata_source(source)
             if metadata_source is not None:
                 validate_configured_path(metadata_source)

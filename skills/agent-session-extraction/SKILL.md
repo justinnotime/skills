@@ -33,6 +33,11 @@ and publication as explicit configuration. Never infer a consumer realm,
 machine identity, or read authority from a hostname, current directory, or
 Backup profile label.
 
+For shared input roots, configure explicit `discovery.directories` in the
+[source manifest](references/manifest.md). This selects literal project subtrees
+before traversal. Test a future matching file in an unselected sibling; a passing
+extraction with only currently selected files does not prove isolation.
+
 ## Operations
 
 - Use `scripts/run --config PATH` for scheduled extraction with an explicitly

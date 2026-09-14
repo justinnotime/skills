@@ -180,6 +180,7 @@
       "properties": {
         "mode": {"enum": ["file", "glob"]},
         "patterns": {"$ref": "#/$defs/strings"},
+        "directories": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "superseded_sha256": {
           "type": "array",
           "uniqueItems": true,
