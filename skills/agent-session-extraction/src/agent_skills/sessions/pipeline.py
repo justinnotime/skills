@@ -38,9 +38,11 @@ from .policies import (
 )
 from .publish import (
     PublishError,
+    discard_git_worktree,
     prepare_git_worktree,
     publish_filesystem,
     require_git_worktree_inventory_at_head,
+    stage_git_worktree,
 )
 from .reconcile import decoder_canary_self_test, reconcile_snapshot
 from .redact import Redactor
@@ -631,6 +633,42 @@ def run_pipeline(
     *,
     dry_run: bool,
     git_worktree_destination: Path | None = None,
+    git_worktree_ref: str | None = None,
+) -> tuple[RunReport, ExtractionSnapshot, PublicationPlan]:
+    if git_worktree_ref is None:
+        return _run_pipeline(
+            manifest, dry_run=dry_run,
+            git_worktree_destination=git_worktree_destination,
+        )
+    if (dry_run or manifest.publisher.strategy != "git-worktree"
+            or git_worktree_destination is None):
+        raise PipelineError("WORKTREE_REF_REQUIRES_PREPARATION")
+    try:
+        prepare_git_worktree(
+            manifest, PublicationPlan((), ()), git_worktree_destination,
+            base_ref=git_worktree_ref,
+        )
+    except PublishError as exc:
+        raise PipelineError("GIT_WORKTREE_PREPARATION_FAILED") from exc
+    isolated = replace(
+        manifest, output=replace(manifest.output, repository_root=git_worktree_destination),
+    )
+    try:
+        return _run_pipeline(
+            isolated, dry_run=False,
+            git_worktree_destination=git_worktree_destination, prepared=True,
+        )
+    except Exception:
+        discard_git_worktree(manifest.output.repository_root, git_worktree_destination)
+        raise
+
+
+def _run_pipeline(
+    manifest: Manifest,
+    *,
+    dry_run: bool,
+    git_worktree_destination: Path | None,
+    prepared: bool = False,
 ) -> tuple[RunReport, ExtractionSnapshot, PublicationPlan]:
     snapshot, _inventory, plan, reconcile, _redactor = evaluate_pipeline(manifest)
     _enforce_source_gate(manifest, snapshot)
@@ -646,7 +684,10 @@ def run_pipeline(
         elif manifest.publisher.strategy == "git-worktree":
             if git_worktree_destination is None:
                 raise PipelineError("GIT_WORKTREE_DESTINATION_REQUIRED")
-            prepare_git_worktree(manifest, plan, git_worktree_destination)
+            if prepared:
+                stage_git_worktree(manifest, plan, git_worktree_destination)
+            else:
+                prepare_git_worktree(manifest, plan, git_worktree_destination)
         elif manifest.publisher.strategy != "none":
             raise PipelineError("UNSUPPORTED_PUBLISHER")
     report = RunReport(

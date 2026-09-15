@@ -25,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     extract.add_argument("--dry-run", action="store_true")
     extract.add_argument("--failure-marker", type=Path)
     extract.add_argument("--prepare-worktree", type=Path)
+    extract.add_argument("--worktree-ref", help="prepare from this commit before reading output inventory")
     extract.add_argument("--output-root", type=Path)
     extract.add_argument(
         "--day-split",
@@ -100,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 failure_marker=args.failure_marker,
                 git_worktree_destination=args.prepare_worktree,
+                git_worktree_ref=args.worktree_ref,
                 output_root=args.output_root,
                 day_split=args.day_split,
             )

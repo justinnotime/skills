@@ -51,6 +51,7 @@ def run(
     environ: Mapping[str, str] | None = None,
     failure_marker: Path | None = None,
     git_worktree_destination: Path | None = None,
+    git_worktree_ref: str | None = None,
     output_root: Path | None = None,
     day_split: str | None = None,
 ) -> RunReport:
@@ -68,6 +69,7 @@ def run(
             manifest,
             dry_run=dry_run,
             git_worktree_destination=git_worktree_destination,
+            git_worktree_ref=git_worktree_ref,
         )
     except PipelineError as exc:
         if failure_marker is not None and not dry_run:
