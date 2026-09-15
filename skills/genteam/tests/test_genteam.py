@@ -283,6 +283,107 @@ class ArchiveTests(Fixture):
         self.assertEqual(archive.month_of("../../x"), "unknown")
 
 
+class PinnedArchiveTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.data["archive"]["selection"] = {"enabled": True, "mode": "pinned"}
+        self.save_config()
+        self.dm = {"id": "ch_dm", "name": "private-chat", "channel_type": "dm"}
+        self.other = {"id": "ch_other", "name": "other", "channel_type": "public"}
+        self.resolved = {
+            "channels": [self.channel, self.dm, self.other],
+            "members": [],
+            "viewer": {"pinned_channel_ids": [self.channel["id"], self.dm["id"]]},
+        }
+        self.message_reads = []
+
+    def request(self, method, path, **kwargs):
+        self.assertEqual(method, "GET")
+        if path == "/servers":
+            return {"servers": [{"id": "server-example", "slug": "example"}]}
+        if path == "/servers/resolve":
+            return self.resolved
+        self.assertRegex(path, r"^/channels/ch_(project|dm|other)/messages$")
+        self.message_reads.append(path)
+        return {"items": [self.message(len(self.message_reads))], "has_more": False}
+
+    def run_archive(self, *options):
+        with mock.patch.object(Client, "request", side_effect=self.request):
+            return archive.main(["--config", str(self.configuration), *options])
+
+    def test_pins_follow_ids_and_refresh_each_run_without_removing_history(self):
+        self.channel["name"] = "renamed-project"
+        self.assertEqual(self.run_archive(), 0)
+        self.assertEqual(
+            self.message_reads, ["/channels/ch_project/messages", "/channels/ch_dm/messages"]
+        )
+        old_files = {p: p.read_bytes() for p in (self.root / "archive").rglob("*.md")}
+        self.assertEqual(len(old_files), 2)
+        self.resolved["viewer"]["pinned_channel_ids"] = [self.other["id"]]
+        self.assertEqual(self.run_archive(), 0)
+        self.assertEqual(self.message_reads[2:], ["/channels/ch_other/messages"])
+        for path, content in old_files.items():
+            self.assertEqual(path.read_bytes(), content)
+        state = json.loads(archive.STATE_FILE.read_text())["channels"]
+        self.assertEqual(state["ch_project"]["newest_id"], "1")
+        self.assertEqual(state["ch_dm"]["newest_id"], "2")
+        self.assertEqual(state["ch_other"]["newest_id"], "3")
+
+    def test_empty_pins_fetch_no_messages(self):
+        self.resolved["viewer"]["pinned_channel_ids"] = []
+        self.assertEqual(self.run_archive(), 0)
+        self.assertEqual(self.message_reads, [])
+        self.assertFalse((self.root / "archive").exists())
+
+    def test_unavailable_or_malformed_pins_fail_without_fetching_or_advancing(self):
+        self.prepare_archive()
+        archive.STATE_FILE.parent.mkdir(parents=True)
+        original = '{"channels": {"ch_project": {"newest_id": "7"}}}'
+        archive.STATE_FILE.write_text(original)
+        for viewer in [
+            None,
+            {},
+            {"pinned_channel_ids": None},
+            {"pinned_channel_ids": "ch_project"},
+            {"pinned_channel_ids": [None]},
+            {"pinned_channel_ids": [""]},
+        ]:
+            with self.subTest(viewer=viewer):
+                self.resolved["viewer"] = viewer
+                self.assertEqual(self.run_archive(), 1)
+                self.assertIn("pinned_channel_ids", self.stderr.getvalue())
+                self.assertEqual(self.message_reads, [])
+                self.assertEqual(archive.STATE_FILE.read_text(), original)
+                self.assertFalse((self.root / "archive").exists())
+
+    def test_selected_listing_applies_pins_without_archive_writes(self):
+        self.assertEqual(self.run_archive("--list-selected"), 0)
+        output = self.stdout.getvalue()
+        self.assertIn("ch_project", output)
+        self.assertIn("ch_dm", output)
+        self.assertNotIn("ch_other", output)
+        self.assertEqual(self.message_reads, [])
+        self.assertFalse((self.root / "archive").exists())
+        self.assertFalse((self.root / "state").exists())
+
+    def test_legacy_selection_does_not_require_pins(self):
+        self.resolved.pop("viewer")
+        for mode, expected in [("whitelist", ["ch_project"]), ("blacklist", ["ch_dm", "ch_other"])]:
+            with self.subTest(mode=mode):
+                self.data["archive"]["selection"] = {
+                    "enabled": True,
+                    "mode": mode,
+                    "chats": [{"match": "PrOjEcT"}],
+                }
+                self.save_config()
+                self.stdout.truncate(0)
+                self.stdout.seek(0)
+                self.assertEqual(self.run_archive("--list-selected"), 0)
+                ids = [line.split()[0] for line in self.stdout.getvalue().splitlines()]
+                self.assertEqual(ids, expected)
+                self.assertEqual(self.message_reads, [])
+
+
 class SendTests(Fixture):
     def test_preview_reply_to_does_not_create_thread(self):
         with (

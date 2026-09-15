@@ -12,7 +12,7 @@ the raw value, never a browser-cookie export.
 | `base_url`, `cookie_file` | Required site origin and cookie path |
 | `archive.output_directory`, `archive.state_file` | Required for direct archiving |
 | `archive.repository_path` | Relative owned subtree for transactional publication |
-| `archive.selection` | `enabled` defaults false; whitelist/blacklist matches channel labels |
+| `archive.selection` | `enabled` defaults false; `mode` is `whitelist`, `blacklist`, or `pinned` |
 | `archive.selection.chats` | Objects containing `match` and optional output `alias` |
 | `archive.selection.bootstrap_days` | Initial history window, default 90 days |
 | `archive.selection.threads` | Include channel threads, default false |
@@ -26,6 +26,18 @@ the raw value, never a browser-cookie export.
 | `send.proposal_ttl_seconds` | Local proposal lifetime, default 3600 seconds |
 | `send.require_tty` | Optional interactive-only policy for direct sends, default false |
 | `publisher.command` | External publisher argument array, required for `--publish` |
+
+Whitelist and blacklist modes match channel labels by case-insensitive substring.
+Pinned mode instead uses `viewer.pinned_channel_ids` from each workspace's
+`/servers/resolve` response, matching the authenticated user's sidebar pins
+(including any service-provided default pins). It does not use `chats` entries.
+Pins are read anew on every run, for both group conversations and DMs. A missing
+or malformed list fails before any messages are fetched; an empty list selects
+nothing. Unpinned archives and progress are retained. Re-pinning resumes from
+the saved message ID; a never-synced conversation uses `bootstrap_days`.
+`--list-selected` shows the currently selected conversations without writing
+archive files or progress. `threads` continues to control fetching replies
+within selected conversations; sidebar-pinned threads are not separate selections.
 
 `--yes` is the explicit direct-send switch. A caller that sets
 `send.require_tty: true` may use `GENTEAM_SEND_NO_TTY_OK=1` for an independently

@@ -104,7 +104,7 @@ class Client:
             except (ValueError, UnicodeError):
                 raise APIError("GenTeam returned invalid JSON") from None
 
-    def channels(self, *, include_threads=True):
+    def channels(self, *, include_threads=True, include_pins=False):
         """Yield channel, members, server id and server slug."""
         for server in rows(self.request("GET", "/servers"), "servers"):
             if not server.get("id"):
@@ -113,6 +113,15 @@ class Client:
                 continue
             slug = server.get("slug") or server["id"]
             resolved = self.request("GET", "/servers/resolve", params={"slug": slug})
+            pinned_ids = set()
+            if include_pins:
+                viewer = resolved.get("viewer")
+                pins = viewer.get("pinned_channel_ids") if isinstance(viewer, dict) else None
+                if not isinstance(pins, list) or any(
+                    not isinstance(cid, str) or not cid for cid in pins
+                ):
+                    raise APIError("GenTeam returned no valid viewer.pinned_channel_ids list")
+                pinned_ids = set(pins)
             members = {member.get("actor_id"): member for member in rows(resolved, "members")}
             for channel in rows(resolved, "channels"):
                 if not channel.get("id"):
@@ -121,6 +130,8 @@ class Client:
                     not include_threads and channel.get("channel_type") == "thread"
                 ):
                     continue
+                if include_pins:
+                    channel = {**channel, "pinned": channel["id"] in pinned_ids}
                 yield channel, members, server["id"], slug
 
 

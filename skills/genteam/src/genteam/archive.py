@@ -55,8 +55,8 @@ def load_config() -> dict:
     cfg.setdefault("chats", [])
     cfg.setdefault("bootstrap_days", DEFAULT_BOOTSTRAP_DAYS)
     cfg.setdefault("threads", False)
-    if cfg["mode"] not in {"whitelist", "blacklist"}:
-        raise ConfigurationError("archive selection mode must be whitelist or blacklist")
+    if cfg["mode"] not in {"whitelist", "blacklist", "pinned"}:
+        raise ConfigurationError("archive selection mode must be whitelist, blacklist or pinned")
     if not isinstance(cfg["chats"], list) or any(
         not isinstance(entry, dict) or not isinstance(entry.get("match"), str) or not entry["match"]
         for entry in cfg["chats"]
@@ -68,7 +68,9 @@ def load_config() -> dict:
 
 
 def selected(label: str, ch: dict, cfg: dict) -> tuple[bool, str]:
-    """Apply whitelist/blacklist to a channel. Returns (selected, alias)."""
+    """Apply the configured selection. Returns (selected, alias)."""
+    if cfg["mode"] == "pinned":
+        return ch.get("pinned") is True, label
     hay = label.lower()
     for entry in cfg["chats"]:
         if entry["match"].lower() in hay:
@@ -305,8 +307,11 @@ def fetch_channel_threads(
 # ---------------------------------------------------------------------------
 
 
-def visible_channels() -> list[tuple[dict, dict, str]]:
-    return [(channel, members, slug) for channel, members, _sid, slug in CLIENT.channels()]
+def visible_channels(*, include_pins=False) -> list[tuple[dict, dict, str]]:
+    return [
+        (channel, members, slug)
+        for channel, members, _sid, slug in CLIENT.channels(include_pins=include_pins)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +328,7 @@ def run(argv=None):
     ap.add_argument("--output-dir", type=Path)
     ap.add_argument("--state-file", type=Path)
     ap.add_argument("--list-channels", action="store_true")
+    ap.add_argument("--list-selected", action="store_true", help="list the current archive selection")
     ap.add_argument("--peek", metavar="MATCH")
     ap.add_argument("--peek-limit", type=int, default=20)
     ap.add_argument("--threads", metavar="MATCH", help="list an existing channel's threads")
@@ -342,9 +348,16 @@ def run(argv=None):
             return 0
         raise
 
-    if args.list_channels:
-        for ch, members, slug in visible_channels():
+    if args.list_channels or args.list_selected:
+        cfg = load_config() if args.list_selected else None
+        if cfg is not None and not cfg["enabled"]:
+            return 0
+        for ch, members, slug in visible_channels(
+            include_pins=cfg is not None and cfg["mode"] == "pinned"
+        ):
             label = channel_label(ch, members)
+            if cfg is not None and not selected(label, ch, cfg)[0]:
+                continue
             print(f"{ch['id']}  [{ch.get('channel_type')}]  {slug}/{label}")
         return
 
@@ -401,7 +414,7 @@ def run(argv=None):
         raise ConfigurationError("archive output_directory and state_file are required")
     state = load_state()
     total = 0
-    chans = visible_channels()
+    chans = visible_channels(include_pins=cfg["mode"] == "pinned")
     log(f"genteam: {len(chans)} channels visible (cookie fingerprint {cookie_fingerprint()})")
     picked = 0
     failed = False
@@ -456,7 +469,7 @@ def configure(args):
 
 
 def publish(args):
-    if args.list_channels or args.peek or args.threads or args.peek_thread:
+    if args.list_channels or args.list_selected or args.peek or args.threads or args.peek_thread:
         raise ConfigurationError("--publish cannot be combined with read-only discovery")
     command = SETTINGS.command("publisher.command")
     if not command:

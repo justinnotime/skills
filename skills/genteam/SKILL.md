@@ -23,6 +23,7 @@ See [configuration](references/configuration.md) and the
 ```bash
 scripts/auth --config /private/genteam.json --check
 scripts/sync --config /private/genteam.json --list-channels
+scripts/sync --config /private/genteam.json --list-selected
 scripts/sync --config /private/genteam.json --peek '<channel match>'
 scripts/sync --config /private/genteam.json --threads '<channel match>'
 scripts/sync --config /private/genteam.json --peek-thread '<thread id>'
@@ -36,6 +37,12 @@ source links, not downloaded files. Selected channel/thread failures return
 failure without saving advanced progress. Bootstrap pagination retains its
 cursor across runs. Use the configured publisher for scheduled repository
 writes so output and progress become durable together.
+
+Set `archive.selection.mode` to `pinned` to archive only the authenticated
+user's sidebar-pinned conversations. Each run reads the current pin IDs; no
+static list is needed. Missing pin metadata fails the run, and an empty list
+selects nothing. Unpinning stops future reads while retaining existing archives
+and progress. `--list-selected` previews the same selection without archiving.
 
 ## Send only when authorized
 
