@@ -163,7 +163,7 @@ def checkout_findings(repo: Mapping[str, object], env: Mapping[str, str] | None 
     return findings
 
 
-def checkout_patrol(base: Mapping[str, str], dry_run: bool) -> int:
+def checkout_patrol(base: Mapping[str, str], dry_run: bool, *, strict: bool = False) -> int:
     """Machine-level check of the configured checkouts: a status file and log lines."""
     repositories = cfg.get("watched_repositories", [], env=base)
     if not repositories:
@@ -194,7 +194,7 @@ def checkout_patrol(base: Mapping[str, str], dry_run: bool) -> int:
             "repositories": report,
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary.replace(path)
-    return 0
+    return int(strict and dirty > 0)
 
 
 def run(env: Mapping[str, str], *, dry_run: bool = False) -> int:
@@ -266,7 +266,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
                         help="inspect existing fleet work without sending or scheduling changes")
+    parser.add_argument("--checkout-patrol-only", action="store_true",
+                        help="inspect configured checkouts without scheduling fleets; fail if unclean")
     args = parser.parse_args(argv)
+    if args.checkout_patrol_only:
+        return checkout_patrol(scheduler_environment(os.environ), args.dry_run, strict=True)
     return run(os.environ, dry_run=args.dry_run)
 
 

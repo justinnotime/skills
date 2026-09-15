@@ -427,3 +427,17 @@ directory without the harness's ownership marker is refused. Each successful
 new setup replaces only an already marked rehearsal directory. `down` stops
 the rehearsal server and preserves its logs; the test wrapper removes its own
 temporary directory after successful shutdown verification.
+
+
+## Standalone checkout inspection
+
+`orc --config /private/runtime.json admin checkout-patrol [--dry-run]` runs
+the existing machine checkout patrol without running a fleet scheduler. The
+configuration uses `watched_repositories` and `paths.orchestrator_state`; no
+fleet, database, transport, or agent registration is required. It records paths
+and modification times, never file contents, and does not move or delete files.
+It exits 0 when selected checkouts are clean, 1 for findings or failed inspection.
+An empty selection performs no work. `--dry-run` returns the same status without
+writing `checkout-patrol.json`. Explicit fleet selectors are rejected because
+the configured repository list belongs to the machine. Existing full ticks
+retain their warning-only behavior for unclean checkouts.

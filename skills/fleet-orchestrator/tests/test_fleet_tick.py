@@ -307,6 +307,54 @@ class CheckoutPatrolTest(unittest.TestCase):
         self.assertFalse(list((self.root / "machine").rglob("*.sqlite3")),
                          "the patrol must not open or create a task store")
 
+    def test_standalone_cli_reports_dirt_without_scheduler_or_contents(self):
+        repo = self.make_repo("selected")
+        scratch = repo / "result.json"
+        scratch.write_text("private-content-canary")
+        unselected = self.make_repo("unselected")
+        (unselected / "hidden.tmp").write_text("untouched")
+        self.config.write_text(json.dumps({
+            "schema": "fleet-runtime/v1",
+            "runtime_dir": str(self.root / "machine"),
+            "watched_repositories": [{"path": str(repo), "kind": "checkout"}],
+        }))
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        forbidden = self.root / "unexpected-command"
+        for command in ("tmux", "gh"):
+            program = bin_dir / command
+            program.write_text(f"#!/bin/sh\ntouch '{forbidden}'\nexit 91\n")
+            program.chmod(0o755)
+        env = {**self.env, "PATH": str(bin_dir) + os.pathsep + self.env["PATH"],
+               "NW_FLEET": "nonexistent"}
+        command = [str(ROOT / "scripts/orc"), "--config", str(self.config),
+                   "admin", "checkout-patrol"]
+        state = self.root / "machine/state/fleet-orchestrator/checkout-patrol.json"
+        for dry in (True, False):
+            result = subprocess.run(command + (["--dry-run"] if dry else []),
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("result.json", result.stdout)
+            self.assertNotIn("private-content-canary", result.stdout + result.stderr)
+            self.assertEqual(state.exists(), not dry)
+            self.assertEqual(scratch.read_text(), "private-content-canary")
+        report = json.loads(state.read_text())
+        self.assertEqual(set(report["repositories"]), {str(repo)})
+        scratch.unlink()
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(state.read_text())["repositories"][str(repo)]["findings"], [])
+        self.assertFalse(forbidden.exists())
+        self.assertFalse(list((self.root / "machine").rglob("*.sqlite3")))
+
+    def test_standalone_cli_rejects_fleet_selection_before_side_effects(self):
+        result = subprocess.run([str(ROOT / "scripts/orc"), "--config", str(self.config),
+                                 "fleet", "example", "admin", "checkout-patrol"],
+                                env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("machine-scoped", result.stderr)
+        self.assertFalse((self.root / "machine").exists())
+
     def test_malformed_patrol_entry_fails_loudly(self):
         self.config.write_text(json.dumps({
             "schema": "fleet-runtime/v1",
