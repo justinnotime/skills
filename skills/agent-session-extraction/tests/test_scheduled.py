@@ -328,7 +328,8 @@ def test_runtime_worktree_dry_modes_do_not_prepare_or_publish(scheduled):
 
 
 @pytest.mark.skipif(not shutil.which("git-crypt"), reason="git-crypt unavailable")
-def test_scheduled_runtime_worktree_encrypts_real_index(scheduled):
+@pytest.mark.parametrize("explicit_ref", [False, True])
+def test_scheduled_runtime_worktree_encrypts_real_index(scheduled, explicit_ref):
     cfg, invoke, repository, _, root = scheduled
     use_runtime_worktree(cfg)
     subprocess.run(["git-crypt", "init"], cwd=repository, capture_output=True, check=True)
@@ -342,7 +343,13 @@ def test_scheduled_runtime_worktree_encrypts_real_index(scheduled):
     data["publisher"].update(encryption="git-crypt", key_link={
         "source": str(key), "target": "git-crypt/keys/default"})
     manifest.write_text(json.dumps(data))
-    result = invoke()
+    extra_env = {}
+    if explicit_ref:
+        cfg["publication"]["base_ref_environment"] = "EXAMPLE_BASE"
+        extra_env["EXAMPLE_BASE"] = git(repository, "rev-parse", "HEAD")
+        (repository / "History").mkdir()
+        (repository / "History/private-draft.md").write_text("uncommitted synthetic draft")
+    result = invoke(extra_env=extra_env)
     assert result.returncode == 0, result.stdout + result.stderr
     worktree = root / "output"
     private = Path(git(worktree, "rev-parse", "--absolute-git-dir"))
@@ -355,3 +362,82 @@ def test_scheduled_runtime_worktree_encrypts_real_index(scheduled):
         assert blob.startswith(b"\x00GITCRYPT")
         assert b"synthetic request" not in blob
         assert not (worktree / path).read_bytes().startswith(b"\x00GITCRYPT")
+
+
+def test_explicit_ref_ignores_dirty_output_and_local_commits(scheduled):
+    cfg, invoke, repository, _, root = scheduled
+    use_runtime_worktree(cfg)
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "local-only.txt").write_text("unpublished local content")
+    git(repository, "add", "local-only.txt")
+    git(repository, "commit", "-m", "Synthetic local-only change")
+    local_head = git(repository, "rev-parse", "HEAD")
+    (repository / "History").mkdir()
+    (repository / "History/local-draft.md").write_text("not an extraction record")
+    (repository / "protected.txt").write_text("staged local change")
+    git(repository, "add", "protected.txt")
+    (repository / "protected.txt").write_text("unstaged local change")
+    status = git(repository, "status", "--porcelain")
+    index = git(repository, "diff", "--cached")
+    cfg["publication"]["base_ref_environment"] = "EXAMPLE_BASE"
+    result = invoke(extra_env={"EXAMPLE_BASE": base})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["session_count"] == 1
+    assert git(repository, "rev-parse", "published^") == base
+    assert git(repository, "rev-parse", "HEAD") == local_head
+    assert git(repository, "status", "--porcelain") == status
+    assert git(repository, "diff", "--cached") == index
+    assert (repository / "protected.txt").read_text() == "unstaged local change"
+    assert not (root / "output/local-only.txt").exists()
+    assert not (root / "output/History/local-draft.md").exists()
+
+
+def test_explicit_ref_failure_removes_only_its_prepared_worktree(scheduled):
+    cfg, invoke, repository, sources, root = scheduled
+    use_runtime_worktree(cfg)
+    cfg["publication"]["base_ref_environment"] = "EXAMPLE_BASE"
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "draft.txt").write_text("preserve this")
+    shutil.rmtree(sources)
+    result = invoke(extra_env={"EXAMPLE_BASE": base})
+    assert result.returncode != 0
+    assert not (root / "output").exists()
+    assert (repository / "draft.txt").read_text() == "preserve this"
+    assert git(repository, "rev-parse", "HEAD") == base
+    assert Path(cfg["failure_marker"]).exists()
+
+
+def test_configured_ref_is_required_only_for_write(scheduled):
+    cfg, invoke, _, _, root = scheduled
+    use_runtime_worktree(cfg)
+    cfg["publication"]["base_ref_environment"] = "EXAMPLE_BASE"
+    for mode in ("--doctor", "--dry-run"):
+        assert invoke(mode).returncode == 0
+    result = invoke("--write", extra_env={"EXAMPLE_OUTPUT": str(root / "output")})
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["code"] == "publisher_base_ref_missing"
+    assert not (root / "output").exists()
+
+
+@pytest.mark.parametrize("value", ["", "BAD-NAME", "EXAMPLE_OUTPUT", None])
+def test_invalid_ref_environment_is_rejected(scheduled, value):
+    cfg, invoke, _, _, root = scheduled
+    use_runtime_worktree(cfg)
+    cfg["publication"]["base_ref_environment"] = value
+    result = invoke()
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["code"] == "invalid_base_ref_environment"
+    assert not (root / "output").exists()
+
+
+
+def test_invalid_ref_fails_before_sources_and_does_not_create_a_worktree(scheduled):
+    cfg, invoke, repository, sources, root = scheduled
+    use_runtime_worktree(cfg)
+    cfg["publication"]["base_ref_environment"] = "EXAMPLE_BASE"
+    shutil.rmtree(sources)
+    result = invoke(extra_env={"EXAMPLE_BASE": "refs/heads/missing-synthetic-ref"})
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["code"] == "GIT_WORKTREE_PREPARATION_FAILED"
+    assert not (root / "output").exists()
+    assert git(repository, "status", "--porcelain") == ""

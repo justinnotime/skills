@@ -84,7 +84,15 @@ ciphertext, and after staging every planned write's index blob must carry the
 git-crypt ciphertext header without its planned plaintext. Any failure removes
 the throwaway worktree and leaves the source repository untouched.
 
-Because a throwaway worktree starts from `HEAD`, `git-worktree` publication
+For isolation from interactive output changes, explicitly pass
+`--prepare-worktree PATH --worktree-ref COMMIT` (API: `git_worktree_ref`).
+The worktree is created from the selected commit before inventory or sources
+are read; the source checkout and its index remain unchanged. This option
+requires a mutating `git-worktree` run and is incompatible with dry-run.
+Scheduled publishers configure `publication.base_ref_environment` for the
+same behavior. No ref is inferred, fetched or pushed by the extraction runtime.
+
+Without an explicit reference, a throwaway worktree starts from `HEAD`, and `git-worktree` publication
 requires every owned output subtree to match `HEAD` immediately before and
 after inventory is read. The same check runs again immediately before worktree
 preparation. Tracked changes, untracked files, ignored files,

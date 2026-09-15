@@ -53,7 +53,8 @@ def load_schedule(path: Path) -> dict:
             raise ScheduleError("absolute_path_required")
     publication = cfg["publication"]
     if (not isinstance(publication, dict)
-            or set(publication) != {"command", "output_root_environment"}):
+            or not {"command", "output_root_environment"} <= publication.keys()
+            or publication.keys() - {"command", "output_root_environment", "base_ref_environment"}):
         raise ScheduleError("invalid_publisher")
     for command in (publication["command"], cfg.get("validate_command", []),
                     cfg.get("preflight_command", [])):
@@ -65,6 +66,12 @@ def load_schedule(path: Path) -> dict:
     name = publication["output_root_environment"]
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         raise ScheduleError("invalid_output_environment")
+    if "base_ref_environment" in publication:
+        reference_name = publication["base_ref_environment"]
+        if (not isinstance(reference_name, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", reference_name)
+                or reference_name == name):
+            raise ScheduleError("invalid_base_ref_environment")
     env = cfg.get("environment", {})
     if not isinstance(env, dict) or any(
         not isinstance(k, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
@@ -158,6 +165,14 @@ def require_worktree(root: Path, repository: Path) -> None:
 
 def extract(cfg: dict, manifest, *, dry_run: bool) -> dict:
     prepare_worktree = not dry_run and manifest.publisher.strategy == "git-worktree"
+    base_ref = None
+    reference_name = cfg["publication"].get("base_ref_environment")
+    if not dry_run and reference_name is not None:
+        if not prepare_worktree:
+            raise ScheduleError("base_ref_requires_git_worktree")
+        base_ref = os.environ.get(reference_name)
+        if not base_ref:
+            raise ScheduleError("publisher_base_ref_missing")
     if dry_run:
         output = Path(cfg["repository_root"])
     else:
@@ -175,6 +190,7 @@ def extract(cfg: dict, manifest, *, dry_run: bool) -> dict:
         report = api.run(cfg["manifest"], dry_run=dry_run,
                          output_root=None if prepare_worktree else output,
                          git_worktree_destination=output if prepare_worktree else None,
+                         git_worktree_ref=base_ref,
                          environ={**os.environ, **cfg.get("environment", {})},
                          failure_marker=None if dry_run else marker(cfg))
     if prepare_worktree:

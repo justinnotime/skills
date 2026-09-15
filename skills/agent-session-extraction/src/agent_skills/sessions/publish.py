@@ -357,7 +357,8 @@ def _private_git_path(root: Path, private_git_dir: Path, relative: str) -> Path:
 
 
 def prepare_git_worktree(
-    manifest: Manifest, plan: PublicationPlan, destination: Path
+    manifest: Manifest, plan: PublicationPlan, destination: Path,
+    *, base_ref: str | None = None,
 ) -> tuple[str, ...]:
     """Prepare and stage an explicit throwaway worktree, without commit or push.
 
@@ -376,7 +377,16 @@ def prepare_git_worktree(
         except ValueError:
             continue
         raise PublishError("throwaway worktree must be outside its source repository")
-    require_git_worktree_inventory_at_head(manifest)
+    if base_ref is None:
+        require_git_worktree_inventory_at_head(manifest)
+        revision = "HEAD"
+    else:
+        if not isinstance(base_ref, str) or not base_ref or "\0" in base_ref:
+            raise PublishError("invalid worktree base reference")
+        revision = _run_git(
+            ["rev-parse", "--verify", "--end-of-options", base_ref + "^{commit}"],
+            cwd=repository,
+        ).strip()
     _run_git(
         [
             "worktree",
@@ -384,7 +394,7 @@ def prepare_git_worktree(
             "--no-checkout",
             "--detach",
             os.fspath(destination),
-            "HEAD",
+            revision,
         ],
         cwd=repository,
     )
@@ -414,35 +424,52 @@ def prepare_git_worktree(
             os.symlink(manifest.publisher.key_link_source, link)
         _run_git(["reset", "--hard", "HEAD"], cwd=destination)
         _refuse_ciphertext(destination, manifest.publisher.owned_subtrees)
-        worktree_manifest = replace(
-            manifest,
-            output=replace(manifest.output, repository_root=destination),
-            publisher=replace(manifest.publisher, strategy="filesystem-atomic"),
-        )
-        publish_filesystem(worktree_manifest, plan)
-        _run_git(["add", "--", *manifest.publisher.owned_subtrees], cwd=destination)
-        if manifest.publisher.encryption == "git-crypt":
-            _verify_git_crypt_index(destination, plan)
-        staged = tuple(
-            line
-            for line in _run_git(
-                ["diff", "--cached", "--name-only", "-z"], cwd=destination
-            ).split("\0")
-            if line
-        )
-        planned_paths = {planned.relative_path for planned in plan.writes}
-        planned_paths.update(removal.relative_path for removal in plan.removals)
-        for name in staged:
-            if not any(
-                name == root or name.startswith(root + "/")
-                for root in manifest.publisher.owned_subtrees
-            ):
-                raise PublishError("git staged a path outside the owned subtrees")
-            if name not in planned_paths:
-                raise PublishError("git staged a path outside the publication plan")
-        return staged
+        return stage_git_worktree(manifest, plan, destination)
     except Exception:
         _run_git(
             ["worktree", "remove", "--force", os.fspath(destination)], cwd=repository
         )
         raise
+
+
+def discard_git_worktree(repository: Path, destination: Path) -> None:
+    """Discard only a caller-owned reproducible extraction attempt."""
+    _run_git(["worktree", "remove", "--force", os.fspath(destination)], cwd=repository)
+
+
+def stage_git_worktree(
+    manifest: Manifest, plan: PublicationPlan, destination: Path
+) -> tuple[str, ...]:
+    """Apply an audited plan to a prepared worktree and verify its staged blobs."""
+    if manifest.publisher.encryption == "git-crypt":
+        _require_git_crypt_attributes(
+            destination, manifest.publisher.owned_subtrees, plan,
+            _git_crypt_filter_for_target(manifest.publisher.key_link_target),
+        )
+    worktree_manifest = replace(
+        manifest,
+        output=replace(manifest.output, repository_root=destination),
+        publisher=replace(manifest.publisher, strategy="filesystem-atomic"),
+    )
+    publish_filesystem(worktree_manifest, plan)
+    _run_git(["add", "--", *manifest.publisher.owned_subtrees], cwd=destination)
+    if manifest.publisher.encryption == "git-crypt":
+        _verify_git_crypt_index(destination, plan)
+    staged = tuple(
+        line
+        for line in _run_git(
+            ["diff", "--cached", "--name-only", "-z"], cwd=destination
+        ).split("\0")
+        if line
+    )
+    planned_paths = {planned.relative_path for planned in plan.writes}
+    planned_paths.update(removal.relative_path for removal in plan.removals)
+    for name in staged:
+        if not any(
+            name == root or name.startswith(root + "/")
+            for root in manifest.publisher.owned_subtrees
+        ):
+            raise PublishError("git staged a path outside the owned subtrees")
+        if name not in planned_paths:
+            raise PublishError("git staged a path outside the publication plan")
+    return staged

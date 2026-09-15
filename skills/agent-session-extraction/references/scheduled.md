@@ -14,6 +14,7 @@ The schedule JSON contains:
 | `repository_root` | Absolute source checkout, matching the manifest |
 | `publication.command` | External publisher command as an argument array |
 | `publication.output_root_environment` | Variable in which that publisher supplies its output worktree |
+| `publication.base_ref_environment` | Optional variable supplying the Git commit/reference from which a `git-worktree` writer starts |
 | `environment` | Optional explicit environment overrides for the publisher |
 | `failure_marker` | Optional absolute path for a sanitized failure report |
 | `preflight_command` | Optional read-only argument array checking consumer policy before every mode, including doctor and dry-run |
@@ -54,6 +55,16 @@ the appended command. For `git-worktree`, it reserves an unused absolute path
 outside the source repository and passes that path through the configured
 output environment variable without creating it. The appended command uses the
 existing runtime to prepare, encrypt, audit, and stage that worktree.
+
+With `publication.base_ref_environment`, the publisher must also supply a
+nonempty commit/reference in that variable. The runtime prepares the worktree
+from that revision **before** reading output inventory or decoding sources;
+dirty, staged, ignored or untracked files in the source checkout do not enter
+the attempt. The caller still selects the manifest and source authority.
+The publisher owns fetching, commit selection, push races and any optional
+update of the interactive checkout. The runtime never changes that checkout.
+Omitting the field preserves the existing HEAD/inventory contract. Doctor and
+dry-run do not require the variable and remain read-only.
 
 In both cases the publisher invokes the appended command,
 and commits/pushes only after that command succeeds. The extraction command
