@@ -351,6 +351,12 @@ entry_env="TMUX=$live_socket,999999,0 TMUX_PANE=$live_pane NW_FLEET="
 check_entry stale-server-reused-pane-number alternate 5 "$stage/orc" tview -t alternate:5
 entry_env="TMUX=$live_socket,999999,166 TMUX_PANE=%999 NW_FLEET="
 check_entry stale-pair-explicit-fleet primary 1 "$stage/orc" tview -t primary:1
+# A daemon can also inherit a pair whose server AND pane are still alive.
+# This shell has a different terminal: entry must not switch the observer.
+entry_env="TMUX=$live_socket,$live_pid,0 TMUX_PANE=$live_pane NW_FLEET=primary"
+check_entry inherited-live-pane primary 2 "$TVIEW" -t :2
+entry_env="TMUX=$live_socket,$live_pid,0 TMUX_PANE=$live_pane NW_FLEET="
+check_entry inherited-live-pane-explicit alternate 5 "$stage/orc" tview -t alternate:5
 entry_env='TMUX= NW_FLEET='
 tmux -L "$server" detach-client -t "$observer_tty"
 wait "$observer_pid" || fail "observer exited nonzero"

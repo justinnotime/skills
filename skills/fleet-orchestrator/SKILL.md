@@ -47,8 +47,9 @@ actual tmux availability. Select `--fleet NAME` explicitly when switching
 fleets. Inside tmux, an unselected `tview` follows the actual associated
 session, not a stale fleet environment variable; outside tmux it needs
 `--fleet NAME` or `NW_FLEET`. Inherited `TMUX` and `TMUX_PANE` count as inside
-tmux only while the server that set them still owns that pane; a stale pair,
-such as one passed down by a daemon started in a pane, means outside tmux.
+tmux only while the server that set them still owns that pane and the caller
+uses that pane's terminal. A pair passed into a new terminal by a daemon means
+outside tmux even if the original pane is still alive.
 Listing and entering do not start offline fleets.
 
 Configuring `fleets.runtime_directory` selects fleet mode; without it the
