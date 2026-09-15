@@ -53,6 +53,7 @@ GROUPS = {
         "verify": "Verify stored task relationships and event history",
         "snapshot": "Write a backup of the task database",
         "tick": "Run scheduled checks and reminders; --dry-run only inspects",
+        "checkout-patrol": "Check configured repositories without scheduling agents; fail if unclean",
         "overdue": "List tasks due for a check; --run-checks executes their checks",
         "import-state": "Import historical state from the former scheduler",
         "config": "Inspect the selected fleet's resolved runtime configuration",
@@ -258,6 +259,11 @@ def main():
             return 0
         if args[:1] == ["help"]:
             return requested_help(args[1:], prefix)
+        if args[:2] == ["admin", "checkout-patrol"] or args[:1] == ["checkout-patrol"]:
+            if selected is not None:
+                raise ValueError("checkout-patrol is machine-scoped; omit the fleet selector")
+            tail = args[2:] if args[0] == "admin" else args[1:]
+            run_script("fleet-tick.py", ["--checkout-patrol-only", *tail])
         if args[:2] == ["admin", "tick"] and selected is None:
             run_script("fleet-tick.py", args[2:])
         if args and args[0] in {"tview", "view"}:

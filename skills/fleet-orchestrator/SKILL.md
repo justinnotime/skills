@@ -92,6 +92,14 @@ than fleet tasks. Starting a fleet needs no separate cron entry. The machine
 must have this one schedule configured; explicit legacy/network profiles
 retain their caller-owned schedules.
 
+For checkout checks without an agent scheduler, use `orc --config FILE admin
+checkout-patrol`. It inspects only `watched_repositories`, writes the same
+machine status report, and exits nonzero for unclean or unavailable checkouts.
+`--dry-run` suppresses the report write. This command does not discover fleets,
+open task/message databases, register agents, or send reminders. Keep its
+schedule in the caller's existing data-job mechanism; do not add a second
+patrol schedule when an existing machine tick already covers those checkouts.
+
 For a status or health request, start with the configured read-only board,
 operator-wait view, task history and diagnostics. Separate these observations:
 
