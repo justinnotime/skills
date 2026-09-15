@@ -112,17 +112,57 @@ class AgentTmuxSendTest(unittest.TestCase):
                 rc = exc
         return rc, calls
 
-    WINDOW4_OVERLAY_TAIL = (
-        "  |                  !example-id bus re  +5 more                      …\n"
-        "  ⏵⏵ auto mode on · 1 monitor · ← for agents\n"
+    CLAUDE_IDLE_FOOTER = (
+        "❯ \n"
+        "  auto mode on · 1 monitor · ← for agents\n"
     )
-    WINDOW15_OVERLAY_TAIL = (
-        "  |         !example-id bus redelivery of closed-task mess  +8 more\n"
-        "  ⏵⏵ auto mode on · 2 shells, 1 monitor · ← for agents\n"
+
+    def test_agents_footer_allows_pull_nudge(self):
+        rc, calls = self._run_with_captures(
+            [
+                self.CLAUDE_IDLE_FOOTER.replace("❯ ", "❯ pull messages"),
+                "❯ pull messages\n  esc to interrupt\n",
+            ],
+            ["4:2.0", "--nudge", "pull"],
+            pre_tail=self.CLAUDE_IDLE_FOOTER,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len([c for c in calls if "paste-buffer" in c[0]]), 1)
+        self.assertEqual(
+            [c[0][-1] for c in calls if "send-keys" in c[0]], ["Enter"]
+        )
+
+    def test_claude_queued_nudge_is_submitted_once(self):
+        queued = (
+            "  ❯ pull messages\n"
+            "❯ Press up to edit queued messages\n"
+            "  auto mode on · ← for agents\n"
+        )
+        rc, calls = self._run_with_captures(
+            [self.CLAUDE_IDLE_FOOTER] + [queued] * 6,
+            ["4:2.0", "--nudge", "pull"],
+            pre_tail=self.CLAUDE_IDLE_FOOTER,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [c[0][-1] for c in calls if "send-keys" in c[0]], ["Enter"]
+        )
+        self.assertFalse(
+            (Path(self._rt()) / "stranded" / "pane-default-35").exists()
+        )
+
+    CONFIRM_DIALOG_TAIL = (
+        "Confirm selection\n"
+        "Enter to confirm · Esc to cancel\n"
+    )
+    SELECTION_DIALOG_TAIL = (
+        "Select an agent\n❯ 1. Review\n  2. Build\n"
+        "Enter to select · Esc to cancel\n"
+        "  auto mode on · 2 shells, 1 monitor · ← for agents\n"
     )
 
     def test_panel_overlay_refuses_before_pasting(self):
-        for tail in (self.WINDOW4_OVERLAY_TAIL, self.WINDOW15_OVERLAY_TAIL):
+        for tail in (self.CONFIRM_DIALOG_TAIL, self.SELECTION_DIALOG_TAIL):
             rc, calls = self._run_with_captures(
                 [], ["4:2.0", "--nudge", "pull"], pre_tail=tail)
             self.assertIsInstance(rc, SystemExit)
@@ -153,7 +193,7 @@ class AgentTmuxSendTest(unittest.TestCase):
 
     def test_focus_stolen_after_paste_sends_zero_enters_and_strands(self):
         rc, calls = self._run_with_captures(
-            [self.WINDOW15_OVERLAY_TAIL],  # post-paste check, attempt 1
+            [self.SELECTION_DIALOG_TAIL],  # post-paste check, attempt 1
             ["4:2.0", "--nudge", "pull"], pre_tail="")
         self.assertIsInstance(rc, SystemExit)
         self.assertNotEqual(rc.code, 0)
@@ -226,14 +266,10 @@ class AgentTmuxSendTest(unittest.TestCase):
                   if "send-keys" in c[0] and "Enter" in c[0]]
         self.assertEqual(enters, [], "unreadable focus = zero keys")
 
-    def test_payload_quoting_the_chrome_holds_its_own_send(self):
-        # tmux3 HIGH: a message QUOTING the overlay bar must not trap
-        # itself in a forever-hold - that sign is undecidable post-paste
-        # and is excluded for this send (the pre-paste check already ran
-        # against the pane's own content)
-        # round 4: quoting the chrome HOLDS its own send - such content
-        # belongs on the bus, never in tmux-send (standing pane-dump rule)
-        quoted = "please look at the bar reading ← for agents on w15"
+    def test_payload_quoting_a_dialog_marker_holds_its_own_send(self):
+        # An actual dialog marker remains ambiguous when quoted in input.
+        # Such content belongs on the bus, rather than in a terminal nudge.
+        quoted = "please look at the dialog reading Enter to select"
         rc, calls = self._run_with_captures(
             ["> " + quoted],  # post-paste check: sign visible = hold
             ["4:2.0", quoted])
@@ -244,12 +280,9 @@ class AgentTmuxSendTest(unittest.TestCase):
         self.assertEqual(enters, [], "any sign sighting = zero Enters")
 
     def test_real_overlay_beside_quoting_payload_still_holds(self):
-        # arbitration addition: coexistence must NOT fail open - the real
-        # bar is never prompt-prefixed, so it holds even while the same
-        # sign also appears quoted inside our own input rendering
+        # A benign navigation hint in the payload cannot hide a real dialog.
         quoted = "look at ← for agents please"
-        both = ("> " + quoted + "\n"
-                "  ⏵⏵ auto mode on · 1 monitor · ← for agents\n")
+        both = "> " + quoted + "\n" + self.SELECTION_DIALOG_TAIL
         rc, calls = self._run_with_captures(
             [both], ["4:2.0", quoted])
         self.assertIsInstance(rc, SystemExit)

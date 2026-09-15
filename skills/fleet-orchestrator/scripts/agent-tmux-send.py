@@ -235,6 +235,7 @@ SUBMITTED_SIGNS = (
     "esc to interrupt",           # claude and codex busy hint
     "esc interrupt",              # OpenCode busy hint
     "Ask Codex to do anything",   # codex empty-input placeholder
+    "Press up to edit queued messages",  # claude accepted into its queue
 )
 
 
@@ -265,7 +266,6 @@ def _stuck_in_input(location: str, needle: str) -> bool:
 
 
 PANEL_OVERLAY_SIGNS = (
-    "← for agents",
     "enter to select",
     "enter to confirm",
     "esc to cancel",
@@ -277,8 +277,9 @@ _CURSOR_OPTION = re.compile(r"(?m)^\s*[>❯]\s*\d+[.)]\s+\S")
 def _panel_overlay(location: str) -> str:
     """Return a dialog marker, unreadable-pane, or an empty string.
 
-    Unreadable input prevents sending. Ignore markers inside our own pasted
-    payload so quoted interface text cannot masquerade as an active dialog.
+    Unreadable input prevents sending. Dialog markers remain conservative,
+    including when quoted in the payload. Navigation hints such as Claude's
+    "← for agents" footer do not identify an active dialog.
     """
     try:
         tail = tmux(["capture-pane", "-p", "-t", location, "-S", "-6"])
