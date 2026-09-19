@@ -57,7 +57,7 @@ reusing that name removes the redirect.
 | `skills/syncthing-doctor/` | Syncthing diagnostic Skill and canonical doctor script |
 | `PROFILES.md` | Backup source-root, destination, exclusion, and upgrade contract |
 | `syncthing-doctor.sh` | Stable compatibility link for Syncthing diagnostics |
-| `skills/remote-clipboard/` | Remote-to-local clipboard Skill and shell function |
+| `skills/remote-clipboard/` | Local, SSH/mosh and tmux clipboard integration |
 | `clip.sh` | Stable compatibility link for the clipboard shell helper |
 | `skills/agent-harness-profiles/` | Configuration-driven launcher and Skill-link setup |
 | `skills/agent-harness-integration/` | Harness × node × profile extension, deployment upgrades and integration acceptance |
@@ -316,15 +316,21 @@ state, scheduling, and publication. No other Skill is required.
 
 ## Clipboard helper
 
-`clip.sh` defines a `clip` shell function that uses `wl-copy` locally and OSC 52
-over SSH, mosh, or tmux. Install it separately if needed:
+The [remote-clipboard Skill](skills/remote-clipboard/SKILL.md) owns Linux/macOS
+native copying, SSH/mosh OSC 52, and optional tmux copy/paste bindings. Its
+`clip.sh` compatibility link still defines `clip`; source it from bash or zsh:
 
 ```bash
-ln -s "$HOME/src/skills/clip.sh" "$HOME/.clip.sh"
+. "$HOME/src/skills/clip.sh"
+printf '%s\n' 'sample' | clip
+clip-tmux -- new-session -A -s main
 ```
 
-Source `$HOME/.clip.sh` from the applicable shell startup file. tmux 3.3 or
-newer should use `set -g allow-passthrough all`.
+The launcher registers each terminal's clipboard backend independently, including
+when local and SSH clients share one tmux session. The package includes a
+previewable tmux installer with backups and live rollback. Forced mouse selection
+and right-click paste are opt-ins. See [tmux setup](skills/remote-clipboard/references/tmux.md).
+Run its isolated checks with `bash skills/remote-clipboard/tests/run.sh`.
 
 ## License
 
