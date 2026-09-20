@@ -20,6 +20,11 @@ the destination. Multiple clients can view the same session simultaneously.
   wl-clipboard's fallback. GNOME desktop environment recovery handles tmux
   servers whose Xauthority path predates the current login.
 - Local macOS: `pbcopy`/`pbpaste`.
+- Apple Terminal over SSH/mosh: Terminal.app does not implement OSC 52 clipboard
+  writes. Use **Fn+drag, then Cmd+C** for local selection/copy, and **Cmd+V** to
+  paste. Plain tmux drag selection does not update the Mac clipboard. See
+  [Apple Terminal](references/tmux.md#apple-terminal-over-sshmosh) before
+  changing remote mouse bindings.
 - SSH/mosh: OSC 52 writes to the client terminal. Its support and clipboard
   permissions must be enabled. Native backend selection never takes priority
   over a detected remote shell, unless the user explicitly selects a backend.
@@ -75,9 +80,11 @@ python3 scripts/tmux-config.py
 ```
 
 Updating the Skill checkout does not install or reload tmux bindings. For a
-reported mouse failure, inspect the running server and the affected application's
-mouse handling first. A request to drag-select over a full-screen agent calls
-for `--mouse select`; the default preserves application mouse handling.
+reported mouse failure, identify the actual client terminal, then inspect the
+running server and the affected application's mouse handling. When the client
+supports OSC 52, `--mouse select` enables tmux drag selection over a full-screen
+agent; the default preserves application mouse handling. Changing those bindings
+cannot add OSC 52 support to Apple Terminal.
 `--paste-bindings` does **not** implement remote mouse paste: its remote action
 only displays a shortcut hint. Use the client terminal's paste action.
 
