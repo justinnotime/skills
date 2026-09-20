@@ -96,9 +96,16 @@ def snapshot(keys, mouse):
     lines = ['set-option -s ' + line for line in lines]
     if mouse == 'select':
         lines.append('set-option -g ' + tmux('show-options', '-g', 'mouse').strip())
+    bindings = {}
+    # Read whole tables: tmux 3.7c may return success with empty output when
+    # list-keys is given an individual key, even when that binding exists.
+    for table in dict.fromkeys(table for table, _ in keys):
+        for line in tmux('list-keys', '-T', table).splitlines():
+            fields = shlex.split(line)
+            key = fields[fields.index('-T') + 2]
+            bindings[table, key] = line
     for table, key in keys:
-        result = subprocess.run(['tmux', 'list-keys', '-T', table, key], capture_output=True, text=True, timeout=5)
-        lines.append(result.stdout.strip() if result.returncode == 0 else f'unbind-key -T {table} {key}')
+        lines.append(bindings.get((table, key), f'unbind-key -T {table} {key}'))
     return '\n'.join(lines) + '\n'
 
 

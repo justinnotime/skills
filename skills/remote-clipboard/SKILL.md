@@ -74,6 +74,13 @@ read [tmux setup](references/tmux.md). Preview with:
 python3 scripts/tmux-config.py
 ```
 
+Updating the Skill checkout does not install or reload tmux bindings. For a
+reported mouse failure, inspect the running server and the affected application's
+mouse handling first. A request to drag-select over a full-screen agent calls
+for `--mouse select`; the default preserves application mouse handling.
+`--paste-bindings` does **not** implement remote mouse paste: its remote action
+only displays a shortcut hint. Use the client terminal's paste action.
+
 Persistent installation is appropriate when the user requests it. Preserve
 unrelated configuration. Forced mouse selection and system-paste bindings are
 separate opt-ins; explain that they replace application mouse handling and
