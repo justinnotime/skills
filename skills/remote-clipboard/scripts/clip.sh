@@ -19,3 +19,6 @@ clip-paste() {
 clip-tmux() {
     python3 "$_REMOTE_CLIPBOARD_COMMAND" tmux "$@"
 }
+clip-terminal() {
+    python3 "$_REMOTE_CLIPBOARD_COMMAND" terminal "$@"
+}

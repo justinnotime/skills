@@ -20,6 +20,12 @@ the destination. Multiple clients can view the same session simultaneously.
   wl-clipboard's fallback. GNOME desktop environment recovery handles tmux
   servers whose Xauthority path predates the current login.
 - Local macOS: `pbcopy`/`pbpaste`.
+- Apple Terminal over SSH/mosh: Terminal.app does not implement OSC 52 clipboard
+  writes. For ordinary drag-to-copy, start the connection locally with
+  `clip-terminal -- ssh ...`; it receives clipboard writes and calls the Mac's
+  native backend. Existing connections need to reconnect through the wrapper.
+  Without it, use **Fn+drag, then Cmd+C**. **Cmd+V** pastes in either case. See
+  [Apple Terminal](references/tmux.md#apple-terminal-over-sshmosh) for setup.
 - SSH/mosh: OSC 52 writes to the client terminal. Its support and clipboard
   permissions must be enabled. Native backend selection never takes priority
   over a detected remote shell, unless the user explicitly selects a backend.
@@ -40,6 +46,7 @@ printf '%s\n' 'sample' | clip
 clip path/to/file
 clip-paste                         # local desktop text to stdout
 clip-tmux -- new-session -A -s main
+clip-terminal -- ssh -t user@example
 ```
 
 `clip-tmux` registers this connection's local or remote backend after attaching.
@@ -75,9 +82,11 @@ python3 scripts/tmux-config.py
 ```
 
 Updating the Skill checkout does not install or reload tmux bindings. For a
-reported mouse failure, inspect the running server and the affected application's
-mouse handling first. A request to drag-select over a full-screen agent calls
-for `--mouse select`; the default preserves application mouse handling.
+reported mouse failure, identify the actual client terminal, then inspect the
+running server and the affected application's mouse handling. When the client
+supports OSC 52, `--mouse select` enables tmux drag selection over a full-screen
+agent; the default preserves application mouse handling. Apple Terminal needs
+the local `clip-terminal` wrapper as well as the remote bindings.
 `--paste-bindings` does **not** implement remote mouse paste: its remote action
 only displays a shortcut hint. Use the client terminal's paste action.
 
@@ -99,7 +108,8 @@ bash tests/run.sh
 
 Tests use synthetic clipboard backends and real isolated tmux servers with two
 terminal clients. They verify routing, actual copy-mode bindings, Unicode and
-multiline paste, configuration preservation, and live rollback. macOS native
+multiline paste, configuration preservation, live rollback, and the local connection wrapper
+with synthetic clipboard backends, resize and terminal restoration. macOS native
 API behavior and real SSH/mosh terminal permissions still require verification
 on those clients. OSC 52 is limited to 100 KB of encoded payload; larger content
 should use file transfer. No background clipboard watcher is installed.

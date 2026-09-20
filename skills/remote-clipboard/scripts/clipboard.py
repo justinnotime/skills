@@ -248,6 +248,9 @@ def main(argv=None):
     sub.add_argument('--backend', choices=BACKENDS, default='auto')
     sub.add_argument('--primary', action='store_true')
     sub.add_argument('args', nargs=argparse.REMAINDER)
+    sub = commands.add_parser('terminal', help='run a connection with local OSC 52 clipboard support')
+    sub.add_argument('--backend', choices=('auto', 'pbcopy', 'xclip', 'wayland'), default='auto')
+    sub.add_argument('args', nargs=argparse.REMAINDER)
     commands.add_parser('doctor')
     args = parser.parse_args(argv)
     if args.action == 'client':
@@ -271,6 +274,20 @@ def main(argv=None):
         if not tail:
             tail = ['new-session', '-A', '-s', 'main']
         os.execvp('tmux', ['tmux', *tail, ';', 'run-shell', command])
+    elif args.action == 'terminal':
+        if remote(os.environ):
+            raise ClipboardError('Run clip-terminal on the local desktop, before connecting over SSH/mosh')
+        env = desktop_env(os.environ)
+        backend = local_backend(env) if args.backend == 'auto' else args.backend
+        if backend == 'osc52':
+            raise ClipboardError('clip-terminal needs a local native clipboard backend')
+        command = args.args[1:] if args.args[:1] == ['--'] else args.args
+        from terminal_bridge import run_terminal
+        try:
+            code = run_terminal(command, lambda data: native_copy(backend, data, env))
+        except ValueError as exc:
+            raise ClipboardError(str(exc)) from exc
+        raise SystemExit(code)
     elif args.action == 'doctor':
         report = {'python': sys.version.split()[0], 'remote_shell': remote(os.environ),
                   'inside_tmux': bool(os.environ.get('TMUX')),
