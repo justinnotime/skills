@@ -40,6 +40,7 @@ class TmuxTests(unittest.TestCase):
         authority.touch()
         self.fake('systemctl', f"print('DISPLAY=:test\\nXAUTHORITY={authority}')")
         self.fake('xclip', "import sys,os\nfrom pathlib import Path\np=Path(os.environ['TEST_CLIPBOARD']+'-'+sys.argv[2])\nif '-in' in sys.argv: p.write_bytes(sys.stdin.buffer.read())\nelse: sys.stdout.buffer.write(p.read_bytes())")
+        self.fake('pbcopy', "import sys,os\nfrom pathlib import Path\nPath(os.environ['TEST_CLIPBOARD']+'-clipboard').write_bytes(sys.stdin.buffer.read())")
         self.receiver = self.root / 'receiver.py'
         self.received = self.root / 'received'
         self.receiver.write_text("import os,sys,tty\ntty.setraw(0)\nos.write(1,b'\\x1b[?2004h\\x1b[?1000h\\x1b[?1002h\\x1b[?1006hclipboard-test')\nf=open(sys.argv[1],'wb',buffering=0)\nwhile True:\n data=os.read(0,4096)\n if not data: break\n f.write(data)\n")
@@ -62,16 +63,21 @@ class TmuxTests(unittest.TestCase):
     def cli(self, *args, data=None):
         return subprocess.run([sys.executable, str(SCRIPTS / 'clipboard.py'), *args], input=data, env=self.env, capture_output=True, check=True, timeout=5)
 
-    def attach(self):
+    def attach(self, bridge=False):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
         tty = os.ttyname(slave)
         env = dict(self.env)
         env.pop('TMUX', None)
-        process = subprocess.Popen(['tmux', '-S', self.socket, 'attach-session', '-t', 'test'], stdin=slave, stdout=slave, stderr=slave, env=env)
+        command = ['tmux', '-S', self.socket, 'attach-session', '-t', 'test']
+        if bridge:
+            command = [str(SCRIPTS/'clip-terminal'), '--backend', 'pbcopy', '--', *command]
+        before = set(self.tm('list-clients', '-F', '#{client_tty}').splitlines())
+        process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env)
         os.close(slave)
         self.attached.append((master, process))
-        wait_for(lambda: tty in self.tm('list-clients', '-F', '#{client_tty}'))
+        wait_for(lambda: set(self.tm('list-clients', '-F', '#{client_tty}').splitlines()) - before)
+        tty = (set(self.tm('list-clients', '-F', '#{client_tty}').splitlines()) - before).pop()
         self.drain(master)
         return tty, master
 
@@ -166,6 +172,25 @@ class TmuxTests(unittest.TestCase):
         self.assertFalse((self.root/'clipboard-clipboard').exists())
         self.assertNotIn(b'\x1b[<32;', self.received.read_bytes())
         self.assertEqual(self.tm('display-message', '-p', '#{pane_in_mode}').strip(), '0')
+
+    def test_terminal_bridge_copies_real_mouse_selection_and_forwards_paste(self):
+        viewer, first = self.attach()
+        remote, second = self.attach(bridge=True)
+        self.install('--mouse', 'select')
+        self.drain(first)
+        self.drain(second)
+        for _ in range(2):
+            output = self.drag(second)
+            wait_for(lambda: (self.root/'clipboard-clipboard').exists()
+                     and (self.root/'clipboard-clipboard').read_bytes() == b'clipboard-')
+            self.assertNotIn(b'\x1b]52;', output)
+            self.assertNotIn(base64.b64encode(b'clipboard-'), self.drain(first))
+        before = len(self.received.read_bytes())
+        payload = '中文\nnext'.encode()
+        os.write(second, b'\x1b[200~' + payload + b'\x1b[201~')
+        expected = b'\x1b[200~' + payload + b'\x1b[201~'
+        wait_for(lambda: len(self.received.read_bytes()[before:]) >= len(expected))
+        self.assertEqual(self.received.read_bytes()[before:], expected)
 
     def test_preserve_mouse_keeps_application_drag_handling(self):
         remote, master = self.attach()

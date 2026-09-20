@@ -64,7 +64,32 @@ features does not mean text reached the Mac clipboard. Remote `pbcopy` would
 also address the wrong machine. Do not keep changing remote bindings or
 terminal features to repair a client capability that is absent.
 
-Use the terminal's local selection instead:
+For ordinary drag-to-copy, start the connection through the local wrapper from
+the stable package on the Mac:
+
+```sh
+scripts/clip-terminal -- ssh -t user@example 'tmux -T clipboard new-session -A -s main'
+```
+
+Replace the SSH command with the user's existing connection command and session;
+`clip-terminal -- az ssh vm ...` and `clip-terminal -- mosh ...` also wrap those
+commands without taking over their authentication. Start it outside the remote
+shell. The `-T clipboard` tmux client flag is appropriate **inside this wrapper**,
+which really implements clipboard writes, even though Terminal.app does not.
+On the remote server, install the `--mouse select` bindings described above.
+Then a plain drag and release copies locally, and Cmd+V pastes as usual.
+
+The wrapper runs only for the lifetime of its child connection. It forwards
+keyboard/mouse input and window sizes, consumes OSC 52 writes with default or
+`c` selection, and calls the existing native clipboard backend. It never reads
+the clipboard or answers clipboard queries. Other terminal output is preserved.
+No port, background watcher, SSH key, or remote desktop clipboard is added.
+Existing SSH/mosh connections cannot be retrofitted: reconnect through the
+wrapper and reattach the same tmux session; do not restart the remote agents.
+Exiting the wrapper restores local terminal settings. To stop using it, connect
+with the original command.
+
+For native copying without the wrapper:
 
 1. Hold **Fn** while dragging over the text, then release it.
 2. Press **Cmd+C** to copy the local selection.
@@ -72,9 +97,7 @@ Use the terminal's local selection instead:
 
 Fn temporarily bypasses mouse reporting; normal tmux wheel handling can remain
 enabled. Apple Terminal uses Fn for this action; do not substitute another
-terminal's Option modifier. Plain drag-to-copy on release still needs an
-explicitly chosen local clipboard bridge or an OSC-52-capable terminal; neither
-is installed by this Skill. Native selection also requires Cmd+C.
+terminal's Option modifier. Native selection also requires Cmd+C.
 
 If the keyboard has no usable Fn key, temporarily turn off **View > Allow Mouse
 Reporting**, select and copy locally, then restore it for tmux scrolling. The
