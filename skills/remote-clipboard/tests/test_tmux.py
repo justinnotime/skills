@@ -42,7 +42,7 @@ class TmuxTests(unittest.TestCase):
         self.fake('xclip', "import sys,os\nfrom pathlib import Path\np=Path(os.environ['TEST_CLIPBOARD']+'-'+sys.argv[2])\nif '-in' in sys.argv: p.write_bytes(sys.stdin.buffer.read())\nelse: sys.stdout.buffer.write(p.read_bytes())")
         self.receiver = self.root / 'receiver.py'
         self.received = self.root / 'received'
-        self.receiver.write_text("import os,sys,tty\ntty.setraw(0)\nos.write(1,b'\\x1b[?2004hclipboard-test')\nf=open(sys.argv[1],'wb',buffering=0)\nwhile True:\n data=os.read(0,4096)\n if not data: break\n f.write(data)\n")
+        self.receiver.write_text("import os,sys,tty\ntty.setraw(0)\nos.write(1,b'\\x1b[?2004h\\x1b[?1000h\\x1b[?1002h\\x1b[?1006hclipboard-test')\nf=open(sys.argv[1],'wb',buffering=0)\nwhile True:\n data=os.read(0,4096)\n if not data: break\n f.write(data)\n")
         import shlex
         command = shlex.join([sys.executable, str(self.receiver), str(self.received)])
         self.tm('-f', '/dev/null', 'new-session', '-d', '-s', 'test', '-x', '100', '-y', '30', command)
@@ -146,6 +146,36 @@ class TmuxTests(unittest.TestCase):
         self.assertNotIn(base64.b64encode(b'clipboard-test'), self.drain(first))
         self.assertFalse((self.root/'clipboard-clipboard').exists())
 
+    def drag(self, master):
+        for event in (b'\x1b[<0;1;1M', b'\x1b[<32;11;1M', b'\x1b[<0;11;1m'):
+            os.write(master, event)
+            time.sleep(.05)
+        return self.drain(master, 1)
+
+    def test_mouse_drag_over_application_targets_initiating_client(self):
+        local, first = self.attach()
+        remote, second = self.attach()
+        self.install('--mouse', 'select')
+        self.cli('client', '--client', local, '--backend', 'xclip')
+        self.assertEqual(self.tm('display-message', '-p', '#{mouse_any_flag}').strip(), '1')
+        self.drain(first)
+        self.drain(second)
+        copied = base64.b64encode(b'clipboard-')
+        self.assertIn(b';' + copied + b'\x07', self.drag(second))
+        self.assertNotIn(copied, self.drain(first))
+        self.assertFalse((self.root/'clipboard-clipboard').exists())
+        self.assertNotIn(b'\x1b[<32;', self.received.read_bytes())
+        self.assertEqual(self.tm('display-message', '-p', '#{pane_in_mode}').strip(), '0')
+
+    def test_preserve_mouse_keeps_application_drag_handling(self):
+        remote, master = self.attach()
+        self.tm('set-option', '-g', 'mouse', 'on')
+        self.install()
+        self.assertEqual(self.tm('display-message', '-p', '#{mouse_any_flag}').strip(), '1')
+        self.drain(master)
+        self.assertNotIn(b'\x1b]52;', self.drag(master))
+        self.assertIn(b'\x1b[<32;', self.received.read_bytes())
+
     def test_local_paste_preserves_unicode_lines_and_brackets(self):
         local, _ = self.attach()
         self.install('--paste-bindings')
@@ -166,7 +196,9 @@ class TmuxTests(unittest.TestCase):
 
     def test_install_idempotence_and_live_rollback(self):
         self.tm('bind-key', '-T', 'root', 'MouseDown3Pane', 'display-message', 'custom original')
-        original = self.tm('list-keys', '-T', 'root', 'MouseDown3Pane')
+        original = self.tm('list-keys', '-T', 'root')
+        self.assertIn('custom original', original)
+        original_copy = self.tm('list-keys', '-T', 'copy-mode')
         before_clipboard = self.tm('show-options', '-s', 'set-clipboard')
         conf, output = self.install('--mouse', 'select', '--paste-bindings')
         installed = conf.read_bytes()
@@ -175,7 +207,8 @@ class TmuxTests(unittest.TestCase):
         backup = output.strip().split('rollback backup: ', 1)[1]
         subprocess.run([sys.executable, str(SCRIPTS/'tmux-config.py'), '--restore', backup, '--apply'], env=self.env, check=True, capture_output=True, timeout=5)
         self.assertEqual(conf.read_text(), 'set -g history-limit 98765\n')
-        self.assertEqual(self.tm('list-keys', '-T', 'root', 'MouseDown3Pane'), original)
+        self.assertEqual(self.tm('list-keys', '-T', 'root'), original)
+        self.assertEqual(self.tm('list-keys', '-T', 'copy-mode'), original_copy)
         self.assertEqual(self.tm('show-options', '-s', 'set-clipboard'), before_clipboard)
 
     def test_rollback_refuses_later_user_edits(self):

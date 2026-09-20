@@ -29,6 +29,18 @@ Optional flags:
 | `--mouse select` | Enable mouse; make drag/double/triple click select even in full-screen applications, replacing their handling of those gestures |
 | `--paste-bindings` | Replace prefix `]`, middle-click and right-click; local registered clients paste the desktop clipboard, remote clients receive a terminal-paste hint |
 
+For drag-to-copy inside a full-screen agent, install explicitly with:
+
+```sh
+python3 scripts/tmux-config.py --config ~/.tmux.conf --mouse select --apply --reload
+```
+
+This replaces application drag/double/triple-click selection. An application
+requesting mouse events otherwise receives the drag, so installing with the
+default `--mouse preserve` can leave the reported problem unchanged. Remote
+right/middle-click paste needs the client terminal's own paste action or menu;
+adding `--paste-bindings` only replaces those clicks with a shortcut hint.
+
 Both copy-mode key tables get mouse-release, word/line, and ordinary keyboard
 copy bindings. Emacs Enter and vi `y` copy as well. Root double/triple click
 preserves application mouse routing unless `--mouse select` is requested.
@@ -121,6 +133,22 @@ public Skill. Keep this package at a stable path, or regenerate the block after
 moving it or its Python interpreter.
 
 ## Evidence and troubleshooting
+
+Check the running server, not just whether the Skill files are up to date:
+
+```sh
+tmux display-message -p 'server=#{version} socket=#{socket_path} application_mouse=#{mouse_any_flag}'
+tmux show-options -Av mouse
+tmux show-options -s set-clipboard
+tmux list-keys -T root
+tmux list-keys -T copy-mode
+tmux list-keys -T copy-mode-vi
+```
+
+The installed copy bindings name `clipboard.py tmux-copy`. In tmux 3.7c,
+`list-keys -T TABLE KEY` can return success with empty output for an existing
+binding; inspect the whole table. The installer snapshots whole tables and
+restores only the bindings it changes.
 
 `clipboard.py doctor` reports tool availability and backend categories without
 printing clipboard text or environment values. Backend errors/timeouts never
