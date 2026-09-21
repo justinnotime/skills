@@ -88,6 +88,7 @@ reusing that name removes the redirect.
 | `skills/activity-summary/` | Configured daily and weekly summaries with deterministic evidence, validation and scheduled publication |
 | `skills/markdown-issues/` | Configured local Markdown issue creation, history validation, due reviews and watched-path signals |
 | `skills/runtime-install/` | Configured Skill discovery links and managed cron installation with preview and preservation of unrelated entries |
+| `skills/result-sharing/` | Durable local/SSH result publication, searchable project catalog and immutable revisions |
 | `skills/runtime-layout/` | Configured runtime path resolution and explicit local layout migration plans |
 | `skills/workspace-brief/` | Read-only workspace briefings from selected local records, checks and configured commands |
 | `skills/structure-lint/` | Runnable repository structure checks with caller-owned metadata, layout and reference rules |
@@ -335,3 +336,5 @@ Run its isolated checks with `bash skills/remote-clipboard/tests/run.sh`.
 ## License
 
 MIT
+
+Result-sharing checks: `(cd skills/result-sharing && python3 -B -m unittest discover -s tests -v)`.

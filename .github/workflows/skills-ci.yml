@@ -143,6 +143,14 @@ jobs:
             kind: python
             python: "3.14"
             check: Python 3.14
+          - skill: result-sharing
+            kind: stdlib
+            python: "3.11"
+            check: Python 3.11
+          - skill: result-sharing
+            kind: stdlib
+            python: "3.14"
+            check: Python 3.14
           - skill: workspace-brief
             kind: python
             python: "3.10"
@@ -303,7 +311,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/skill-check"
           cp -a "$GITHUB_WORKSPACE/skills/$SKILL" "$RUNNER_TEMP/skill-check/$SKILL"
       - name: Set up uv and Python
-        if: matrix.kind == 'python' || matrix.kind == 'instruction'
+        if: matrix.kind == 'python' || matrix.kind == 'instruction' || matrix.kind == 'stdlib'
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.30"
@@ -334,6 +342,12 @@ jobs:
         run: |
           uv sync --locked --all-extras
           uv run --no-sync pytest tests -q -rs
+      - name: Test and validate standalone standard-library Skill
+        if: matrix.kind == 'stdlib'
+        working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
+        run: |
+          python -B -m unittest discover -s tests -v
+          uvx --from skills-ref==0.1.1 agentskills validate "$PWD"
       - name: Validate instruction-only Skill
         if: matrix.kind == 'instruction'
         working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
