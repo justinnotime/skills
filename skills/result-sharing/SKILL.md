@@ -44,8 +44,10 @@ AgentsView; the publisher copies only the selected result files.
 For setup, node onboarding, HTTP serving and upgrade boundaries, read
 [the configuration and deployment contract](references/configuration.md).
 Each node needs only this standalone package and its own private configuration.
-Only the hub runs a web service. Remote nodes call the same publisher through
-SSH; do not start a preview server on every node.
+Choose node-local publication when each node keeps its own results: use the same
+relative directory contract and a local viewer per node. Use a central hub only
+when explicitly configured; then publishers can use SSH without extra web
+services. Neither mode needs a new preview server for each result.
 
 Runtime: Python 3.10+ on Linux/macOS; SSH for remote transport. No third-party
 Python dependencies. Run `python3 -B -m unittest discover -s tests -v` from this

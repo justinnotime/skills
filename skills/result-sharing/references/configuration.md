@@ -1,12 +1,16 @@
 # Configuration and deployment
 
-Private configuration is separate from this distributable package. A local hub:
+Private configuration is separate from this distributable package. For consistent
+node-local storage, use `~/.config/result-sharing/config.json` and
+`~/.local/share/result-sharing/site/` on each node. These are per-user directories,
+not a shared cross-node destination. Configure only source roots authorized on
+that node; do not infer grants from another node. A local viewer:
 
 ```json
 {
   "schema": "result-sharing/v1",
   "allowed_source_roots": ["/approved/project"],
-  "root": "/private/runtime/results",
+  "root": "~/.local/share/result-sharing/site",
   "base_url": "http://127.0.0.1:8081",
   "transport": {"kind": "local"}
 }
