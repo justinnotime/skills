@@ -16,6 +16,11 @@ destination and transport; this Skill does not infer account or node scope.
 If there is no configuration, finish preparing the result and ask for the
 intended destination. Do not invent a public host or upload private material.
 
+If the result was made in scratch space, copy only the reviewed deliverable
+files into an approved project output directory, following its worktree policy.
+Do not widen source grants to all of `/tmp` or the home directory to bypass a
+failed publication. Preparing that durable source is part of delivering the result.
+
 Prepare an explicit file list, including the entry page's local dependencies.
 Review those files under the originating repository's publication policy.
 Publish the deliverable, not an entire checkout, harness home or conversation
