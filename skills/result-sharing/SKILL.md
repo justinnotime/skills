@@ -57,3 +57,10 @@ services. Neither mode needs a new preview server for each result.
 Runtime: Python 3.10+ on Linux/macOS; SSH for remote transport. No third-party
 Python dependencies. Run `python3 -B -m unittest discover -s tests -v` from this
 package, and validate `SKILL.md` with the Skill validator.
+
+For authenticated viewing, compose an independently deployed `private-web-access`
+gateway and optional `tailscale-serve` ingress through their public interfaces.
+They are not publisher dependencies. Use an isolated read-only origin, a backend
+credential and an explicit published directory root. Never serve arbitrary result
+HTML on the login origin or conversation-viewer origin. Publication grants and
+browser-access grants remain separate caller-owned policy.

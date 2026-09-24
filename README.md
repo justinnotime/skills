@@ -88,6 +88,9 @@ reusing that name removes the redirect.
 | `skills/activity-summary/` | Configured daily and weekly summaries with deterministic evidence, validation and scheduled publication |
 | `skills/markdown-issues/` | Configured local Markdown issue creation, history validation, due reviews and watched-path signals |
 | `skills/runtime-install/` | Configured Skill discovery links and managed cron installation with preview and preservation of unrelated entries |
+| `skills/private-web-access/` | Standalone single-owner Passkey gateway, portal and HTTP security boundaries |
+| `skills/tailscale-serve/` | Ownership-aware private HTTPS ingress procedure |
+| `skills/agentsview-access/` | Scoped read-only conversation viewer deployment and verification |
 | `skills/result-sharing/` | Durable local/SSH result publication, searchable project catalog and immutable revisions |
 | `skills/runtime-layout/` | Configured runtime path resolution and explicit local layout migration plans |
 | `skills/workspace-brief/` | Read-only workspace briefings from selected local records, checks and configured commands |
@@ -338,3 +341,9 @@ Run its isolated checks with `bash skills/remote-clipboard/tests/run.sh`.
 MIT
 
 Result-sharing checks: `(cd skills/result-sharing && python3 -B -m unittest discover -s tests -v)`.
+
+Private web access checks: see the package-owned
+[standalone test commands](skills/private-web-access/references/testing.md).
+Tailscale Serve and AgentsView access are independent deployment procedures;
+their origins, grants and services come from caller-owned external profiles.
+They compose through public interfaces with the gateway and result publisher.

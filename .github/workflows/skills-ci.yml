@@ -143,6 +143,14 @@ jobs:
             kind: python
             python: "3.14"
             check: Python 3.14
+          - skill: tailscale-serve
+            kind: access-instruction
+            python: "3.14"
+            check: Skill format
+          - skill: agentsview-access
+            kind: access-instruction
+            python: "3.14"
+            check: Skill format
           - skill: result-sharing
             kind: stdlib
             python: "3.11"
@@ -311,7 +319,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/skill-check"
           cp -a "$GITHUB_WORKSPACE/skills/$SKILL" "$RUNNER_TEMP/skill-check/$SKILL"
       - name: Set up uv and Python
-        if: matrix.kind == 'python' || matrix.kind == 'instruction' || matrix.kind == 'stdlib'
+        if: matrix.kind == 'python' || matrix.kind == 'instruction' || matrix.kind == 'stdlib' || matrix.kind == 'access-instruction'
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.30"
@@ -348,6 +356,10 @@ jobs:
         run: |
           python -B -m unittest discover -s tests -v
           uvx --from skills-ref==0.1.1 agentskills validate "$PWD"
+      - name: Validate independent access procedure
+        if: matrix.kind == 'access-instruction'
+        working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
+        run: uv run --locked agentskills validate "$PWD"
       - name: Validate instruction-only Skill
         if: matrix.kind == 'instruction'
         working-directory: ${{ runner.temp }}/skill-check/${{ matrix.skill }}
@@ -523,3 +535,34 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(find scripts -type f -print0)
+
+  private-web:
+    name: private-web-access / isolated security and browser checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.27.1"
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.14.0"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.30"
+          enable-cache: false
+      - name: Verify copied standalone package
+        run: |
+          cp -a "$GITHUB_WORKSPACE/skills/private-web-access" "$RUNNER_TEMP/private-web-access"
+          cd "$RUNNER_TEMP/private-web-access"
+          go test -race ./...
+          go vet ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npm run test:browser
+          uvx --from skills-ref==0.1.1 agentskills validate "$PWD"

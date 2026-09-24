@@ -1,0 +1,3 @@
+interface:
+  display_name: "Private Web Access"
+  short_description: "Deploy a single-owner Passkey gateway for private web applications"
