@@ -1,115 +1,60 @@
-# Configuration and deployment
+# Configuration and responsibilities
 
-Private configuration is separate from this distributable package. For consistent
-node-local storage, use `~/.config/result-sharing/config.json` and
-`~/.local/share/result-sharing/site/` on each node. These are per-user directories,
-not a shared cross-node destination. Configure only source roots authorized on
-that node; do not infer grants from another node. A local viewer:
+Use one task root per machine and OS user, shared by all agents. `~/ops/` is a
+default, not a requirement that every machine have identical paths. A caller
+may keep non-secret native configuration in a private repository, or keep it
+outside Git. Neither arrangement needs a machine-ID registry.
 
-```json
-{
-  "schema": "result-sharing/v1",
-  "allowed_source_roots": ["/approved/project"],
-  "root": "~/.local/share/result-sharing/site",
-  "base_url": "http://127.0.0.1:8081",
-  "transport": {"kind": "local"}
-}
+## Agent profile
+
+The optional `profile.md` records the selected task root, delivery subdirectory,
+audience/source grant and how to locate the viewer's native settings. It may
+link to existing machine instructions instead of copying them. For example:
+
+```markdown
+Task root: ~/ops
+Results: result-sharing/<project>/; working evidence: tasks/<task>/.
+Audience: this owner may browse the whole task root.
+Viewer: Quantum source ops, mounted read-only from the task root.
+Gateway: ~/.config/private-web-access/settings.json, application files.
+Deployment: /private/deployment/compose.yaml and its native environment file.
 ```
 
-`root` must be a dedicated durable directory, outside source worktrees and
-scratch space. `base_url` is the viewer-facing artifact URL; it can be reached
-through an SSH tunnel. It must not contain credentials. Scope source roots to
-approved projects. An explicit file selection is still required under those
-roots. Source roots grant publication only; they do not grant a session reader
-access to anything else. `max_files` (default 2000) and `max_bytes` (default
-100 MiB) can lower limits. Raise the implementation ceilings only after review.
+Agents read the profile as prose. Programs do not parse it. The URL helper takes
+explicit arguments and reads the existing gateway JSON; it does not load a
+second result-sharing JSON. A machine with no browser needs only the task-root
+instruction. Install the Skill and profile into the caller's selected harness
+roots with their normal installer; already running sessions must reread changed
+instructions and may need a new session to rediscover Skills.
 
-A publishing node uses the same schema with `allowed_source_roots` and:
+## Where configuration becomes behavior
 
-```json
-{
-  "transport": {
-    "kind": "ssh",
-    "target": "result-hub",
-    "receiver_command": [
-      "/usr/bin/python3", "/opt/result-sharing/scripts/share.py",
-      "--config", "/private/receiver.json", "receive"
-    ]
-  }
-}
-```
+| Input | Consumer and effect |
+| --- | --- |
+| Skill plus private Markdown profile | Agent chooses the output path and returns a link |
+| Installer's package/profile selections | Installer creates discovery/configuration links only |
+| Caller-owned service unit or supervisor | Starts the explicitly selected native commands |
+| Compose file plus native environment | Docker resolves paths, UID/GID and mounts; starts the viewer/proxy |
+| Quantum YAML plus private `auth-files.yaml` | Quantum loads sources, read permissions and signed backend authentication |
+| Nginx native files plus private assertion | Nginx checks the gateway credential and permits reviewed read routes |
+| Passkey gateway native JSON | Gateway selects origins, upstreams and credentials; authenticates the owner |
+| HTTPS binding configuration | Agent/operator applies the terminator's official interface, such as `tailscale serve` |
 
-Merge these fields into a complete configuration. The receiver uses the local
-hub configuration; it does not need `allowed_source_roots` because it receives
-explicit bytes rather than reading sender paths. Set `allowed_projects` on a
-receiver to restrict an individual publisher's project slugs. Use an existing
-authorized SSH credential/host configuration. Host verification is never disabled.
-The command uses stdin JSON with base64 file bytes, validates paths and checksums,
-and writes under a lock; no remote shell interpolation of result metadata.
-A remote receipt proves durable publication, not browser reachability from the
-user's device. Validate that access separately when setting up a node.
+No additional lowering or configuration compilation happens between these
+layers. Compose's `extends` and bind mounts can reuse this package's recipe;
+custom paths belong in native environment/overrides. The source name in Quantum
+determines the URL prefix; changing it also requires updating legacy redirects
+and the agent profile. Changing only the host root preserves URLs.
 
-For a dedicated publish-only SSH credential, the operator may configure a forced
-receiver command with forwarding/PTY disabled. This package does not create keys,
-modify SSH policy or grant new node access. An ordinary SSH credential retains
-its existing account privileges. Nodes under different privacy boundaries need
-separate profiles, roots and access policy; sharing this public Skill grants no
-cross-boundary access.
+## Boundaries
 
-## Hub layout and serving
+File writing, source exposure and recipient distribution are separate grants.
+Configure only authorized roots; never infer a grant from another machine,
+backup membership or a directory's existence. All Passkeys in a single-owner
+gateway access all its configured applications. Multiple recipients with
+different permissions require a different authorization design.
 
-```text
-root/
-  index.html                 task and folder browser
-  library.css / library.js    self-contained browser assets
-  library.json               published project histories and file metadata
-  catalog.json               latest-release catalog (compatible with existing readers)
-  projects/<slug>/
-    index.html               revision history
-    <content-sha256>/
-      index.html             result details and file links
-      manifest.json          hashes, sizes and publication time
-      files/...              immutable selected content
-```
-
-`reindex` repairs generated navigation from published manifests. No automatic
-pruning or remote deletion is provided. Retain source files and back up the
-configured runtime root under the operator's existing policy. The publisher
-rejects changed bytes at a previously published content address.
-
-The browser searches filenames, project slugs and release titles. Select a project
-to browse folders or choose a historical release. By default, each path appears
-once using its newest published copy; older copies remain in the release selector.
-Text previews are limited to 1 MiB and Markdown is rendered without raw HTML.
-Interactive HTML reports open directly in the isolated result origin. No arbitrary
-filesystem endpoint, directory watcher or new service is needed. Every successful
-publish rebuilds the browser data; `reindex` upgrades existing libraries without
-changing release manifests or files. The Refresh button reloads the catalog.
-
-Use an existing read-only static server for `root`, with authentication and the
-operator's chosen transport. Keep services on loopback when SSH forwarding is
-the access model. Permit GET/HEAD; publishing goes through the CLI/SSH receiver,
-not through the web server. Serve executable HTML/JS artifacts on a different
-origin/port from conversation history. Do not mount the entire filesystem or
-harness credentials. A private HTTP endpoint and a public Skill are independent
-choices: this package does not make uploaded content public.
-
-For a conversation companion such as AgentsView:
-
-1. Install a pinned upstream release after checksum and source review. Define
-   approved native session directories and any project filters in private config.
-2. Use read-only source mounts. Keep its writable index/runtime state separate.
-   Do not treat backup membership as conversation-read authorization.
-3. Configure the browser gateway to permit reading only, including blocking
-   mutation API methods. Hiding buttons alone is insufficient. Keep backend
-   credentials server-side and use an authenticated frontend.
-4. Disable unneeded external update/telemetry requests, verify language search,
-   a real conversation, artifact interaction and mobile navigation. Verify blocked
-   write requests against an isolated synthetic service before real deployment.
-5. Keep service units, actual addresses, credentials, release pins and source
-   mounts in the caller's owning configuration repository. Package upgrades do
-   not implicitly change grants or overwrite service policy.
-
-AgentsView indexes conversations; this publisher maintains durable deliverables
-and their navigation. A conversation URL is optional because viewer URL formats
-and retention policies belong to that separately versioned application.
+The live viewer opens current bytes and has no immutable result history.
+Existing repository or file-backup policy provides recovery. Optional
+[legacy publication](legacy-publication.md) provides versioned copies when
+explicitly selected; the two modes never require each other.

@@ -1,74 +1,73 @@
 ---
 name: result-sharing
-description: Publish selected agent deliverables to a configured durable result hub and return browsable links. Use when sharing generated reports, interactive pages, diagrams or downloadable files, or setting up a common result destination across nodes. Supports local and SSH publishing, project history and related conversation links.
+description: Write agent deliverables to the machine's shared task root and return live file-browser links. Use for reports, diagrams, downloadable results, or configuring their read-only viewer behind separate authentication. Immutable local or SSH publication remains an explicitly selected compatibility mode.
 ---
 
-# Share durable results
+# Write and browse results
 
-When the user wants to inspect or share a completed artifact, publish its selected
-files with this package's `scripts/share.py`. Return the receipt's `result_url`
-and, when useful, `entry_url`. A temporary directory, terminal log, or ad hoc web
-server is not the final delivery destination when a hub is configured.
+Read the caller-selected profile, `$RESULT_SHARING_PROFILE`, or
+`${XDG_CONFIG_HOME:-$HOME/.config}/result-sharing/profile.md` when present.
+It is guidance for the agent, not a program configuration format. Reuse the
+machine's selected task root across agents and conversations; default to
+`~/ops/` only when no existing choice applies. An unreadable explicitly selected
+profile is a configuration error, not permission to invent another destination.
 
-Read the explicitly selected `--config`, `RESULT_SHARING_CONFIG`, or default
-`~/.config/result-sharing/config.json`. Configuration defines source grants,
-destination and transport; this Skill does not infer account or node scope.
-If there is no configuration, finish preparing the result and ask for the
-intended destination. Do not invent a public host or upload private material.
+Write deliverables directly to `<task-root>/result-sharing/<project>/` and keep
+working evidence in `<task-root>/tasks/<task>/`. Continue existing task folders.
+Repository edits and tests still follow their worktree rules. Keep credentials,
+application databases and authentication state in their owning applications'
+private directories, outside any browsable root.
 
-If the result was made in scratch space, copy only the reviewed deliverable
-files into an approved project output directory, following its worktree policy.
-Do not widen source grants to all of `/tmp` or the home directory to bypass a
-failed publication. Preparing that durable source is part of delivering the result.
+For an already authorized live viewer, saving the file makes it available;
+refresh the directory or file to see changes. There is no `output/` or `site/`
+stage, manifest, copy, publish command or per-report server. The viewer has a
+metadata index, not a second copy of the documents. An existing open page need
+not update until refreshed.
 
-Prepare an explicit file list, including the entry page's local dependencies.
-Review those files under the originating repository's publication policy.
-Publish the deliverable, not an entire checkout, harness home or conversation
-archive. Hidden paths and symlinks are rejected; content scanning remains the
-caller's responsibility. Ordinary authorization to share a result covers the
-configured destination, not public release or sending messages to third parties.
+Return the local path and, when configured, a URL relative to the approved
+viewer source. With the bundled Quantum recipe, the route is
+`/files/<source-name>/<percent-encoded-relative-path>`. The optional helper reads
+only the origin from the gateway's native configuration, avoiding a duplicate URL:
 
 ```sh
-python3 scripts/share.py publish --source /approved/output \
-  --project example --title 'Example result' --entry index.html \
-  --files index.html app.js style.css assets/chart.svg
+python3 scripts/live.py url --root /approved/task-root \
+  --gateway-config /private/gateway.json --app files --source ops \
+  /approved/task-root/result-sharing/example/report.md
 ```
 
-Use `--dry-run` for selection and local boundary validation without network or
-writes. It does not prove receiver reachability. The same project slug groups
-revisions; changed content or metadata creates an immutable version, and an
-identical publish returns the same URL. The hub index and project history update
-automatically. The hub includes a task and folder browser with filename search,
-file-type filters, release selection, text/image previews and downloads. Its
-default file view keeps the newest published copy of each path across a task's
-history, so earlier reports remain discoverable. It indexes published manifests
-only; merely saving a file in a source or task directory does not publish it.
-Keep the source until a successful receipt; a failed transport
-must not be described as a published result. A retry is safe for the same bundle.
+If no viewer exists, deliver the local file and state that a browser link is
+not configured. Do not install a service or widen a source grant merely to
+finish a report. A configured whole-root viewer exposes working evidence as
+well as final reports to its owner; a final-only grant uses a narrower mount.
+Owner access does not authorize public publication or sending files to others.
 
-Use `--summary` to explain the outcome and `--conversation-url` for an existing,
-authorized conversation-viewer link. Do not embed login tokens in links. Full
-conversation indexing belongs to a separately configured viewer such as
-AgentsView; the publisher copies only the selected result files.
+## Setup and maintenance
 
-For setup, node onboarding, HTTP serving and upgrade boundaries, read
-[the configuration and deployment contract](references/configuration.md).
-Each node needs only this standalone package and its own private configuration.
-Choose node-local publication when each node keeps its own results: use the same
-relative directory contract and a local viewer per node. Use a central hub only
-when explicitly configured; then publishers can use SSH without extra web
-services. Neither mode needs a new preview server for each result.
+For deployment, read [configuration and responsibilities](references/configuration.md),
+then the [live viewer recipe](references/live-viewer.md). The layers are:
 
-Runtime: Python 3.10+ on Linux/macOS; SSH for remote transport. No third-party
-Python dependencies. Run `python3 -B -m unittest discover -s tests -v` from this
-package, and validate `SKILL.md` with the Skill validator.
-For browser changes, run `npm ci --ignore-scripts --no-audit --no-fund`,
-`npx playwright install chromium`, and `npm run test:browser`. The browser suite
-uses temporary synthetic publications and no owner configuration or credentials.
+- This Skill defines writing and link delivery, and owns the optional file-browser
+  recipe and its tests.
+- FileBrowser Quantum displays the selected local files read-only.
+- An independent `private-web-access` gateway provides Passkey login. An
+  independently configured HTTPS terminator, optionally `tailscale-serve`,
+  forwards only to that gateway.
 
-For authenticated viewing, compose an independently deployed `private-web-access`
-gateway and optional `tailscale-serve` ingress through their public interfaces.
-They are not publisher dependencies. Use an isolated read-only origin, a backend
-credential and an explicit published directory root. Never serve arbitrary result
-HTML on the login origin or conversation-viewer origin. Publication grants and
-browser-access grants remain separate caller-owned policy.
+Native application configuration remains the authority. There is no combined
+configuration generator, and installing Skill links does not deploy services.
+Keep the existing owner, origins and Passkey records when changing the viewer.
+The recipe is tested on Linux with Docker Compose; other service managers and
+operating systems require their own deployment checks.
+
+Markdown, text, images and downloads are supported. This read-only recipe does
+not host arbitrary interactive HTML; embedded PDF/HTML frames and external code
+dependencies are restricted by the gateway policy. Use a separately authorized
+application deployment when executable report pages are required.
+
+For a caller who explicitly wants immutable revisions or a central SSH hub, use
+[legacy publication](references/legacy-publication.md) and `scripts/share.py`.
+Do not select it merely because an old JSON file still exists. Preserve existing
+legacy data during migration; switching workflows does not authorize deletion.
+
+Run the package's standard-library tests and Skill validator after changes.
+Deployment changes also require the [real viewer and Passkey checks](references/live-viewer.md#verification).

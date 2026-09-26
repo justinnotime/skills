@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs",
+    "test:live": "python3 tests/live/check.py"
   },
   "devDependencies": {
     "playwright": "1.63.0"

@@ -1,0 +1,57 @@
+# Native reference recipe. Caller-owned Compose files may extend these services.
+services:
+  files:
+    image: ghcr.io/gtsteffaniak/filebrowser@sha256:2adb06e46e1bdbed38e76eb4bcb562fbce0bef0a2bdcbb17f0a2002e4844a24d
+    user: "${RESULT_SHARING_UID:?set uid}:${RESULT_SHARING_GID:?set gid}"
+    environment:
+      FILEBROWSER_CONFIG: /cfg/files.yaml
+      FILEBROWSER_DATABASE: /state/database.db
+      GOMAXPROCS: "2"
+    volumes:
+      - "${RESULT_SHARING_PACKAGE:?set package path}/assets/live/files.yaml:/cfg/files.yaml:ro"
+      - "${RESULT_SHARING_PACKAGE}/assets/live/viewer.css:/cfg/viewer.css:ro"
+      - "${RESULT_SHARING_AUTH:?set private credential directory}/quantum-auth.yaml:/cfg/auth-files.yaml:ro"
+      - "${RESULT_SHARING_STATE:?set private state directory}:/state"
+      - "${RESULT_SHARING_ROOT:?set approved source root}:/files:ro"
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--unix-socket", "/state/run/http.sock", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+
+  proxy:
+    image: nginx@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6
+    user: "${RESULT_SHARING_UID:?set uid}:${RESULT_SHARING_GID:?set gid}"
+    entrypoint: nginx
+    command: ["-g", "daemon off;"]
+    volumes:
+      - "${RESULT_SHARING_PACKAGE}/assets/live/nginx.conf:/etc/nginx/nginx.conf:ro"
+      - "${RESULT_SHARING_PACKAGE}/assets/live/files-server.conf:/etc/nginx/files-server.conf:ro"
+      - "${RESULT_SHARING_PACKAGE}/assets/live/files-proxy.conf:/etc/nginx/files-proxy.conf:ro"
+      - "${RESULT_SHARING_AUTH}/results.htpasswd:/etc/nginx/results.htpasswd:ro"
+      - "${RESULT_SHARING_AUTH}/quantum-upstream.conf:/etc/nginx/quantum-upstream.conf:ro"
+      - "${RESULT_SHARING_STATE}/run:/filebrowser:ro"
+    ports: ["127.0.0.1:${RESULT_SHARING_PORT:-8081}:8081"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    restart: unless-stopped
+    depends_on: [files]
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
