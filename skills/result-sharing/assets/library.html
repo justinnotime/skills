@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>任务结果 · Results</title>
+    <link rel="stylesheet" href="library.css" />
+    <script src="library.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#">任务结果 <span>Results</span></a
+      ><button id="refresh">刷新</button>
+    </header>
+    <div class="workspace">
+      <aside>
+        <h2>任务</h2>
+        <nav id="projects" aria-label="任务列表"></nav>
+        <p class="aside-note">完成结果发布后，会自动出现在这里。</p>
+      </aside>
+      <main>
+        <div class="heading">
+          <div>
+            <p class="eyebrow">文件浏览</p>
+            <h1 id="title">全部任务</h1>
+            <p id="summary"></p>
+          </div>
+          <a id="open-entry" class="primary" hidden>打开最新报告</a>
+        </div>
+        <div class="toolbar">
+          <label class="search"
+            ><span class="sr-only">搜索文件或任务</span
+            ><input
+              id="search"
+              type="search"
+              placeholder="搜索文件、任务或报告标题…"
+          /></label>
+          <label
+            ><span class="sr-only">文件类型</span
+            ><select id="type">
+              <option value="">全部类型</option>
+              <option value="document">文档</option>
+              <option value="image">图片</option>
+              <option value="data">数据</option>
+              <option value="code">代码</option>
+              <option value="other">其他</option>
+            </select></label
+          >
+          <label
+            ><span class="sr-only">排序</span
+            ><select id="sort">
+              <option value="recent">最近发布</option>
+              <option value="name">名称</option>
+              <option value="size">大小</option>
+            </select></label
+          >
+        </div>
+        <div class="location">
+          <nav id="breadcrumbs" aria-label="文件路径"></nav>
+          <label id="version-label" hidden
+            >版本
+            <select id="version" aria-label="版本"></select
+          ></label>
+        </div>
+        <p id="status" role="status">正在读取结果…</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>任务</th>
+                <th>发布于</th>
+                <th class="size">大小</th>
+                <th><span class="sr-only">操作</span></th>
+              </tr>
+            </thead>
+            <tbody id="files"></tbody>
+          </table>
+        </div>
+        <p id="empty" hidden>没有找到匹配的文件。</p>
+        <noscript
+          >请启用 JavaScript 浏览文件；已有报告的直接链接仍可使用。</noscript
+        >
+      </main>
+    </div>
+    <dialog id="preview">
+      <div class="preview-top">
+        <h2 id="preview-title"></h2>
+        <button id="close-preview" aria-label="关闭预览">关闭</button>
+      </div>
+      <p id="preview-meta"></p>
+      <div id="preview-content"></div>
+      <div class="preview-actions">
+        <a id="preview-open" target="_blank" rel="noopener">打开原文件</a
+        ><a id="preview-download" download>下载文件</a>
+      </div>
+    </dialog>
+  </body>
+</html>

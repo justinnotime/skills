@@ -60,8 +60,10 @@ cross-boundary access.
 
 ```text
 root/
-  index.html                 searchable latest-project catalog
-  catalog.json               structured catalog
+  index.html                 task and folder browser
+  library.css / library.js    self-contained browser assets
+  library.json               published project histories and file metadata
+  catalog.json               latest-release catalog (compatible with existing readers)
   projects/<slug>/
     index.html               revision history
     <content-sha256>/
@@ -74,6 +76,15 @@ root/
 pruning or remote deletion is provided. Retain source files and back up the
 configured runtime root under the operator's existing policy. The publisher
 rejects changed bytes at a previously published content address.
+
+The browser searches filenames, project slugs and release titles. Select a project
+to browse folders or choose a historical release. By default, each path appears
+once using its newest published copy; older copies remain in the release selector.
+Text previews are limited to 1 MiB and Markdown is rendered without raw HTML.
+Interactive HTML reports open directly in the isolated result origin. No arbitrary
+filesystem endpoint, directory watcher or new service is needed. Every successful
+publish rebuilds the browser data; `reindex` upgrades existing libraries without
+changing release manifests or files. The Refresh button reloads the catalog.
 
 Use an existing read-only static server for `root`, with authentication and the
 operator's chosen transport. Keep services on loopback when SSH forwarding is
