@@ -1,0 +1,71 @@
+# FileBrowser Quantum native configuration. Secrets are scalar YAML anchors in
+# the owner-only auth-files.yaml mount; credentials stay outside the browsable source.
+server:
+  socket: /state/run/http.sock
+  database: /state/database.db
+  cacheDir: /tmp/cache
+  disableUpdateCheck: true
+  disableWebDAV: true
+  disablePreviews: true
+  sources:
+    - name: ops
+      path: /files
+      config:
+        private: true
+        readOnly: true
+        defaultEnabled: true
+        rules:
+          - ignoreSymlinks: true
+  logging:
+    - levels: warning|error
+      apiLevels: error
+      output: stdout
+      noColors: true
+      utc: true
+auth:
+  adminPassword: *admin_password
+  methods:
+    password:
+      enabled: false
+      signup: false
+    jwt:
+      enabled: true
+      header: X-Filebrowser-Assertion
+      algorithm: HS256
+      secret: *backend_jwt_secret
+      userIdentifier: sub
+frontend:
+  name: Files
+  disableDefaultLinks: true
+  disableUsedPercentage: true
+  disablePWAInstall: true
+  externalLinks: []
+  styling:
+    disableEventThemes: true
+    customCSS: /cfg/viewer.css
+userDefaults:
+  account:
+    disableSettings: true
+    disableUpdateNotifications: true
+    lockPassword: true
+    permissions:
+      api: false
+      admin: false
+      modify: false
+      create: false
+      delete: false
+      share: false
+      realtime: false
+      download: true
+  listing:
+    viewMode: list
+    singleClick: true
+    showHidden: true
+  sidebar:
+    disableQuickToggles: true
+    hideFileActions: true
+    showTools: false
+  fileViewer:
+    preferEditorForMarkdown: false
+  ui:
+    locale: en

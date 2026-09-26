@@ -1,0 +1,5 @@
+/* This read-only viewer uses the portal for login/logout and fixed preferences. */
+.headline-card,
+[aria-label="Edit Links"] {
+  display: none !important;
+}

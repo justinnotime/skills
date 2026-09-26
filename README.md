@@ -91,7 +91,7 @@ reusing that name removes the redirect.
 | `skills/private-web-access/` | Standalone single-owner Passkey gateway, portal and HTTP security boundaries |
 | `skills/tailscale-serve/` | Ownership-aware private HTTPS ingress procedure |
 | `skills/agentsview-access/` | Scoped read-only conversation viewer deployment and verification |
-| `skills/result-sharing/` | Durable local/SSH result publication, searchable project catalog and immutable revisions |
+| `skills/result-sharing/` | Shared task-root delivery, live read-only file browsing and optional legacy publication |
 | `skills/runtime-layout/` | Configured runtime path resolution and explicit local layout migration plans |
 | `skills/workspace-brief/` | Read-only workspace briefings from selected local records, checks and configured commands |
 | `skills/structure-lint/` | Runnable repository structure checks with caller-owned metadata, layout and reference rules |
@@ -273,6 +273,10 @@ or shared source directory. Run additional checks from the affected package:
 (cd skills/slack-archive && uv run --locked pytest tests)
 (cd skills/whatsapp-archive && uv run --locked pytest tests && npm ci --prefix bridge && npm test --prefix bridge)
 ```
+
+The result-sharing live viewer reference has separate Docker/Passkey integration
+checks. From its package, set `PRIVATE_WEB_BINARY` to a reviewed gateway executable
+and run `npm run test:live`; see its native deployment recipe for prerequisites.
 
 Consumers of the session Python API configure the runtime root as
 `/absolute/path/to/skills/agent-session-extraction`; its import directory is
