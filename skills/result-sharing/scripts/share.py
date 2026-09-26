@@ -21,6 +21,7 @@ from urllib.parse import quote, urlsplit
 SCHEMA = "result-sharing/v1"
 MAX_BYTES = 100 * 1024 * 1024
 MAX_FILES = 2000
+ASSETS = Path(__file__).resolve().parents[1] / "assets"
 
 
 def fail(message):
@@ -193,7 +194,8 @@ def atomic(p, data):
 def catalog(root):
     projects = root / "projects"
     rows = []
-    for project in sorted(projects.iterdir()):
+    library = []
+    for project in sorted(projects.iterdir()) if projects.exists() else []:
         if not project.is_dir() or project.is_symlink():
             continue
         releases = []
@@ -232,36 +234,21 @@ def catalog(root):
         )
         latest = releases[0]
         rows.append(latest)
+        library.append({"project": latest["project"], "releases": releases})
     rows.sort(key=lambda x: (x["published_at"], x["project"]), reverse=True)
-    cards = []
-    for r in rows:
-        cards.append(
-            '<article><a href="projects/'
-            + r["project"]
-            + "/"
-            + r["revision"]
-            + "/files/"
-            + quote(r["entry"], safe="/")
-            + '">'
-            + html.escape(r["title"])
-            + "</a><p>"
-            + html.escape(r["summary"])
-            + "</p><small>"
-            + html.escape(r["project"])
-            + " · "
-            + r["published_at"]
-            + '</small><p><a href="projects/'
-            + r["project"]
-            + '/">History / 历史版本</a></p></article>'
-        )
-    search = '<input id="search" type="search" placeholder="Search results / 搜索产物" aria-label="Search results">'
-    script = "<script>document.querySelector('#search').oninput=e=>{const q=e.target.value.toLocaleLowerCase();document.querySelectorAll('article').forEach(a=>a.hidden=!a.textContent.toLocaleLowerCase().includes(q))}</script>"
+    library.sort(
+        key=lambda x: (x["releases"][0]["published_at"], x["project"]), reverse=True
+    )
     atomic(
         root / "catalog.json", canonical({"schema": SCHEMA, "projects": rows}) + b"\n"
     )
     atomic(
-        root / "index.html", page("Results / 产物", search + "".join(cards) + script)
+        root / "library.json",
+        canonical({"schema": SCHEMA, "projects": library}) + b"\n",
     )
+    for name in ("library.css", "library.js"):
+        atomic(root / name, (ASSETS / name).read_bytes())
+    atomic(root / "index.html", (ASSETS / "library.html").read_bytes())
 
 
 def receive(cfg, value):

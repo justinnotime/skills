@@ -38,7 +38,12 @@ Use `--dry-run` for selection and local boundary validation without network or
 writes. It does not prove receiver reachability. The same project slug groups
 revisions; changed content or metadata creates an immutable version, and an
 identical publish returns the same URL. The hub index and project history update
-automatically. Keep the source until a successful receipt; a failed transport
+automatically. The hub includes a task and folder browser with filename search,
+file-type filters, release selection, text/image previews and downloads. Its
+default file view keeps the newest published copy of each path across a task's
+history, so earlier reports remain discoverable. It indexes published manifests
+only; merely saving a file in a source or task directory does not publish it.
+Keep the source until a successful receipt; a failed transport
 must not be described as a published result. A retry is safe for the same bundle.
 
 Use `--summary` to explain the outcome and `--conversation-url` for an existing,
@@ -57,6 +62,9 @@ services. Neither mode needs a new preview server for each result.
 Runtime: Python 3.10+ on Linux/macOS; SSH for remote transport. No third-party
 Python dependencies. Run `python3 -B -m unittest discover -s tests -v` from this
 package, and validate `SKILL.md` with the Skill validator.
+For browser changes, run `npm ci --ignore-scripts --no-audit --no-fund`,
+`npx playwright install chromium`, and `npm run test:browser`. The browser suite
+uses temporary synthetic publications and no owner configuration or credentials.
 
 For authenticated viewing, compose an independently deployed `private-web-access`
 gateway and optional `tailscale-serve` ingress through their public interfaces.

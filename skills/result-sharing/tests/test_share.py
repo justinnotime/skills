@@ -260,6 +260,49 @@ class Sharing(unittest.TestCase):
         with self.assertRaises(ValueError):
             share.decode('{"files":{}, "files":{}}')
 
+    def test_file_browser_preserves_history_and_indexes_only_published_files(self):
+        (self.source / "private.txt").write_text("not selected")
+        nested = self.source / "reports" / "notes.md"
+        nested.parent.mkdir()
+        nested.write_text("# Earlier report")
+        first = share.publish(
+            self.cfg, self.bundle(entry="reports/notes.md", files=["reports/notes.md"])
+        )
+        second = share.publish(self.cfg, self.bundle(summary="New result"))
+        manifests = list(self.root.glob("projects/*/*/manifest.json"))
+        before = {p: p.read_bytes() for p in manifests}
+        share.catalog(self.root)
+        library = json.loads((self.root / "library.json").read_text())
+        releases = library["projects"][0]["releases"]
+        self.assertEqual(
+            [r["revision"] for r in releases], [second["revision"], first["revision"]]
+        )
+        self.assertIn("reports/notes.md", releases[1]["files"])
+        self.assertNotIn("private.txt", json.dumps(library))
+        self.assertEqual(before, {p: p.read_bytes() for p in manifests})
+        for name in ("library.js", "library.css"):
+            self.assertEqual(
+                (self.root / name).read_bytes(), (share.ASSETS / name).read_bytes()
+            )
+        self.assertIn('id="projects"', (self.root / "index.html").read_text())
+        self.assertTrue(
+            (
+                self.root
+                / "projects/demo"
+                / first["revision"]
+                / "files/reports/notes.md"
+            ).exists()
+        )
+
+    def test_empty_catalog_and_unpublished_directories(self):
+        self.root.mkdir()
+        (self.root / "private.txt").write_text("not published")
+        share.catalog(self.root)
+        self.assertEqual(
+            json.loads((self.root / "library.json").read_text())["projects"], []
+        )
+        self.assertNotIn("private.txt", (self.root / "index.html").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
