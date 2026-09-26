@@ -75,6 +75,9 @@ def main():
             'tmpfs': ['/tmp:rw,noexec,nosuid,size=32m,mode=1777'],
             'volumes': [f'{temp}/nginx.conf:/etc/nginx/nginx.conf:ro', f'{temp}/results.htpasswd:/etc/nginx/results.htpasswd:ro', f'{temp}/quantum-upstream.conf:/etc/nginx/quantum-upstream.conf:ro', f'{proxy_config}:/etc/nginx/files-proxy.conf:ro', f'{server_config}:/etc/nginx/files-server.conf:ro', f'{state}/run:/filebrowser:ro'],
             'ports': ['127.0.0.1::8081'], 'depends_on': ['files'],
+            # Reuse the existing bridge: a new host bridge can interrupt Chromium
+            # during its network-change notification, unrelated to application policy.
+            'network_mode': 'bridge',
         }
         fixture_file = temp / 'compose.json'
         fixture_file.write_text(json.dumps({'name': 'live-' + secrets.token_hex(4), 'services': {'files': files, 'gateway': gateway}}))
