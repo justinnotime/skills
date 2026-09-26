@@ -31,6 +31,9 @@ func (w *responseBoundary) WriteHeader(code int) {
 		}
 	}
 	security(dst, w.published)
+	for _, policy := range w.header.Values("Content-Security-Policy") {
+		dst.Add("Content-Security-Policy", policy)
+	}
 	if w.trusted {
 		dst.Set("Permissions-Policy", "publickey-credentials-get=(self), publickey-credentials-create=(self), document-domain=()")
 	}

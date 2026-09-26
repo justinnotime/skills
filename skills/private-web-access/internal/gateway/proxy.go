@@ -114,7 +114,11 @@ func Proxy(a Application, primary string) (http.Handler, error) {
 				u.RawPath = ""
 				h.Set("Location", u.String())
 			}
-			security(h, a.Content == "published")
+			// Browser policies intersect. Retain stricter application policies
+			// without allowing them to replace the gateway's own restrictions.
+			for _, policy := range r.Header.Values("Content-Security-Policy") {
+				h.Add("Content-Security-Policy", policy)
+			}
 			r.Header = h
 			// HTTP trailers are not an alternate response-header authority channel.
 			r.Trailer = nil

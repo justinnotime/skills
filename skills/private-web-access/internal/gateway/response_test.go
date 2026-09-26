@@ -102,3 +102,29 @@ func TestResponseTrailersAreNotForwarded(t *testing.T) {
 		t.Fatalf("response trailers forwarded: %#v", resp.Trailer)
 	}
 }
+
+func TestApplicationContentPoliciesAreAdditionalRestrictions(t *testing.T) {
+	for _, policies := range [][]string{
+		{"script-src 'none'; sandbox"},
+		{"script-src 'nonce-synthetic'", "img-src 'none'"},
+		{"default-src * 'unsafe-inline'"},
+	} {
+		proxy := reviewProxy(t, func(w http.ResponseWriter, r *http.Request) {
+			for _, policy := range policies {
+				w.Header().Add("Content-Security-Policy", policy)
+			}
+			w.Write([]byte("synthetic"))
+		})
+		w := httptest.NewRecorder()
+		proxy.ServeHTTP(w, httptest.NewRequest("GET", "https://gateway.example.test:8443/", nil))
+		actual := w.Header().Values("Content-Security-Policy")
+		if len(actual) != len(policies)+1 || !strings.Contains(actual[0], "connect-src 'self'") || !strings.Contains(actual[0], "frame-src 'none'") {
+			t.Fatalf("gateway policy missing: %#v", actual)
+		}
+		for i, policy := range policies {
+			if actual[i+1] != policy {
+				t.Fatalf("application policy changed: %#v", actual)
+			}
+		}
+	}
+}

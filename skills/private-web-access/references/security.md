@@ -24,6 +24,9 @@ Unsafe primary-origin requests require exact Origin and recent verification.
 Sibling-origin requests cannot call primary APIs even though they are same-site.
 Applications have separate CSP, CORP and COOP policies; auth APIs exist only on the
 primary origin. CSP is defense in depth, not a replacement for safe rendering.
+The gateway retains upstream Content-Security-Policy headers as additional
+restrictions. Browsers enforce them together with the mandatory gateway policy;
+an application's nonce or download sandbox cannot loosen the gateway policy.
 Generated HTML is executable content: isolate it and publish only deliberately
 selected artifacts. Same-origin artifacts can read each other's content. Browser
 navigation/downloads and a user's ability to save content are not exfiltration prevention.
